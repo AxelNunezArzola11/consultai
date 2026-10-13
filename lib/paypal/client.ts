@@ -65,6 +65,22 @@ export async function getAccessToken(): Promise<string> {
 }
 
 /**
+ * Safely parses a Response body as JSON.
+ * Returns a fallback object if the body is empty or not valid JSON.
+ * Use this instead of `res.json()` whenever the response may have an empty body
+ * (e.g. PayPal 5xx errors sometimes return no body).
+ */
+export async function safeJson(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return { _raw: text };
+  }
+}
+
+/**
  * Generic PayPal API fetch.
  * Obtains a fresh token and includes standard headers.
  *

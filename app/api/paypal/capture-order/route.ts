@@ -28,7 +28,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 
-import { paypalFetch } from "@/lib/paypal/client";
+import { paypalFetch, safeJson } from "@/lib/paypal/client";
 import { db } from "@/lib/db";
 import { payments, milestones } from "@/lib/db/schema";
 import {
@@ -42,6 +42,7 @@ import { writeAuditLog } from "@/lib/db/audit";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  try {
   const body = await req.json().catch(() => null);
   const orderID    = body?.orderID    as string | undefined;
   const paymentId  = body?.paymentId  as string | undefined;
@@ -80,10 +81,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     idempotencyKey: `capture_${paymentId}`,
   });
 
-  const captureData = await res.json() as Record<string, unknown>;
+  // Use safeJson: PayPal may return empty body on some error codes
+  const captureData = await safeJson(res);
 
   if (!res.ok) {
-    console.error("[capture-order] PayPal error:", JSON.stringify(captureData));
+    console.error("[capture-order] PayPal error HTTP", res.status, JSON.stringify(captureData));
     return NextResponse.json({ error: "Capture failed", detail: captureData }, { status: res.status });
   }
 
@@ -199,4 +201,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     paymentId,
     milestoneId:   paymentRow.milestoneId,
   });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[capture-order] Unexpected error:", message);
+    return NextResponse.json({ error: "Internal server error", detail: message }, { status: 500 });
+  }
 }
