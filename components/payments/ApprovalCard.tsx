@@ -47,8 +47,10 @@ export function ApprovalCard({
   const isActionable =
     milestoneStatus === "funded" ||
     milestoneStatus === "pending_approval";
-  const isProcessing = milestoneStatus === "verifying" || paymentStatus === "processing";
-  const isPaid       = milestoneStatus === "paid"      || paymentStatus === "succeeded";
+  // "processing" on a payment row means the ORDER was captured (held).
+  // Only treat it as "payout in flight" when the milestone itself says verifying.
+  const isProcessing = milestoneStatus === "verifying";
+  const isPaid       = milestoneStatus === "paid" || paymentStatus === "succeeded";
 
   async function handleApprove() {
     if (!recipientEmail) {

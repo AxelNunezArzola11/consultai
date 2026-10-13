@@ -1,29 +1,41 @@
 /**
  * PayPal REST client — shared fetch wrapper for all PayPal API calls.
  *
- * Env vars (required, no defaults for secrets):
- *   PAYPAL_CLIENT_ID       — from PayPal Developer Dashboard
- *   PAYPAL_CLIENT_SECRET   — from PayPal Developer Dashboard
- *   PAYPAL_ENV             — "sandbox" | "live"
- *   PAYPAL_BASE_URL        — must be set explicitly; no hardcoded fallback per Phase 1 rules
+ * Env vars:
+ *   PAYPAL_CLIENT_ID       — from PayPal Developer Dashboard (required)
+ *   PAYPAL_CLIENT_SECRET   — from PayPal Developer Dashboard (required)
+ *   PAYPAL_ENV             — "sandbox" | "live" (required; used to derive default base URL)
+ *   PAYPAL_BASE_URL        — override the API base URL; if absent, derived from PAYPAL_ENV:
+ *                              sandbox → https://api-m.sandbox.paypal.com
+ *                              live    → https://api-m.paypal.com
  *
  * Doc: https://developer.paypal.com/api/rest/authentication/
  * Doc: https://developer.paypal.com/api/rest/requests/#http-request-headers
  */
 
+/** API base URLs per environment. */
+const PAYPAL_BASE_URLS: Record<string, string> = {
+  sandbox: "https://api-m.sandbox.paypal.com",
+  live:    "https://api-m.paypal.com",
+};
+
 /**
- * Returns the PayPal API base URL from environment.
- * Throws if missing — fail fast; never default silently.
+ * Returns the PayPal API base URL.
+ * Prefers PAYPAL_BASE_URL if set. Falls back to PAYPAL_ENV-derived URL.
+ * Throws only if neither PAYPAL_BASE_URL nor a recognised PAYPAL_ENV is set.
  */
 export function getPayPalBaseUrl(): string {
-  const base = process.env.PAYPAL_BASE_URL;
-  if (!base) {
-    throw new Error(
-      "PAYPAL_BASE_URL is not set. Set to https://api-m.sandbox.paypal.com (sandbox) " +
-        "or https://api-m.paypal.com (live) in Vercel env vars."
-    );
-  }
-  return base.replace(/\/$/, "");
+  const explicit = process.env.PAYPAL_BASE_URL;
+  if (explicit) return explicit.replace(/\/$/, "");
+
+  const env  = (process.env.PAYPAL_ENV ?? "sandbox").toLowerCase();
+  const derived = PAYPAL_BASE_URLS[env];
+  if (derived) return derived;
+
+  throw new Error(
+    `PAYPAL_BASE_URL is not set and PAYPAL_ENV ("${env}") is not recognised. ` +
+      `Set PAYPAL_ENV=sandbox or PAYPAL_ENV=live in Vercel env vars.`
+  );
 }
 
 /**

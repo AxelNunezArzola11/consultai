@@ -98,54 +98,66 @@ export default async function ApprovalsPage({
             ? candidateRows.find((c) => c.id === payment.candidateId)
             : undefined;
 
+          // Use real payment ledger if available; fall back to milestone capture fields
+          // (milestone-2 was seeded with capture amounts but no payments row)
+          const grossUsd  = payment?.grossUsd  ?? milestone.captureGrossUsd;
+          const feeUsd    = payment?.feeUsd    ?? milestone.captureFeeUsd;
+          const netUsd    = payment?.netUsd    ?? milestone.captureNetUsd;
+          const currency  = payment?.currency  ?? "USD";
+          // Payout amount: net from capture (what platform holds)
+          const payoutAmt = netUsd ?? milestone.budgetUsd;
+
+          const statusLabel =
+            milestone.status === "funded"           ? "Held (simulated)" :
+            milestone.status === "pending_approval" ? "Awaiting Approval" :
+            milestone.status === "verifying"        ? "Payout Processing" :
+            milestone.status;
+          const badgeVariant =
+            milestone.status === "verifying" ? "default" as const : "outline" as const;
+
           return (
             <Card key={milestone.id}>
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-base">{milestone.title}</CardTitle>
-                  <Badge variant={milestone.status === "verifying" ? "default" : "outline"}>
-                    {milestone.status === "funded"           ? "Held (simulated)" :
-                     milestone.status === "pending_approval" ? "Awaiting Approval" :
-                     milestone.status === "verifying"        ? "Payout Processing" :
-                     milestone.status}
-                  </Badge>
+                  <Badge variant={badgeVariant}>{statusLabel}</Badge>
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                {/* Fee breakdown */}
-                {payment && (
+                {/* Ledger — always shown when any capture data exists */}
+                {(grossUsd || netUsd) && (
                   <div className="rounded-lg border bg-muted/40 px-4 py-3 text-xs space-y-1">
                     <p className="font-medium text-muted-foreground mb-1">Ledger</p>
-                    {payment.grossUsd && (
+                    {grossUsd && (
                       <div className="flex justify-between">
                         <span className="text-muted-foreground">Company paid (gross)</span>
-                        <strong>${Number(payment.grossUsd).toFixed(2)} {payment.currency ?? "USD"}</strong>
+                        <strong>${Number(grossUsd).toFixed(2)} {currency}</strong>
                       </div>
                     )}
-                    {payment.feeUsd && (
+                    {feeUsd && (
                       <div className="flex justify-between">
                         <span className="text-muted-foreground">PayPal fee (orders)</span>
-                        <span className="text-destructive">−${Number(payment.feeUsd).toFixed(2)}</span>
+                        <span className="text-destructive">−${Number(feeUsd).toFixed(2)}</span>
                       </div>
                     )}
-                    {payment.netUsd && (
+                    {netUsd && (
                       <div className="flex justify-between border-t pt-1 mt-1">
                         <span className="font-medium">Platform holds</span>
                         <strong className="text-green-600 dark:text-green-400">
-                          ${Number(payment.netUsd).toFixed(2)} {payment.currency ?? "USD"}
+                          ${Number(netUsd).toFixed(2)} {currency}
                         </strong>
                       </div>
                     )}
                   </div>
                 )}
 
-                {/* Approval card */}
-                {payment && (
+                {/* Approval card — shown when a real payments row exists */}
+                {payment ? (
                   <ApprovalCard
                     paymentId={payment.id}
                     milestoneTitle={milestone.title}
-                    amountUsd={payment.netUsd ?? milestone.budgetUsd}
-                    currency={payment.currency ?? "USD"}
+                    amountUsd={payoutAmt}
+                    currency={currency}
                     justification={payment.justification ?? undefined}
                     candidateName={candidate?.name ?? undefined}
                     candidateEmail={candidate?.email ?? undefined}
@@ -153,6 +165,18 @@ export default async function ApprovalsPage({
                     milestoneStatus={milestone.status}
                     paymentStatus={payment.status}
                   />
+                ) : (
+                  // Milestone was funded via seed/demo — no payments row exists.
+                  // Show a note so the user knows to use the milestones page to
+                  // fund via the real PayPal flow (which creates the payments row).
+                  <p className="text-xs text-muted-foreground rounded-lg border bg-muted/30 px-3 py-2">
+                    This milestone was funded via the demo seed (no real PayPal payment row).
+                    To trigger a real payout, fund it via{" "}
+                    <a href={`/project/${id}/milestones`} className="underline text-foreground">
+                      the milestones page
+                    </a>{" "}
+                    using the PayPal checkout button.
+                  </p>
                 )}
               </CardContent>
             </Card>
