@@ -59,15 +59,25 @@ Run these curls against the **deployed domain** (not localhost):
 ```bash
 # Should return our generic 400 (not Vercel's 401 page, not a 404)
 curl -s -o /dev/null -D - \
-  -X POST https://your-app.vercel.app/api/paypal/webhook \
+  -X POST https://consultai-s7a6b5qdw-fabricpilot.vercel.app/api/paypal/webhook \
   -H "Content-Type: application/json" \
   -d '{}' | head -12
-# Expected: HTTP/2 400  +  {"error":"invalid request"}
+# Observed output (2026-10-13):
+#   HTTP/2 400
+#   content-type: application/json
+#   x-matched-path: /api/paypal/webhook    ← confirms OUR route answered, not Vercel's error page
+
+# Body must be our generic JSON (no reason leaked):
+curl -s -X POST https://consultai-s7a6b5qdw-fabricpilot.vercel.app/api/paypal/webhook \
+  -H "Content-Type: application/json" \
+  -d '{}'
+# Observed: {"error":"invalid request"}
 ```
 
 ```bash
 # Should return 200 with milestone status
-curl -s https://your-app.vercel.app/api/milestone-status/milestone-1 | head -c 200
+curl -s https://consultai-s7a6b5qdw-fabricpilot.vercel.app/api/milestone-status/milestone-1 | head -c 200
+# Observed: {"milestoneId":"milestone-1","status":"pending_approval","captureGrossUsd":"800.00",...}
 ```
 
 ### 4. Database schema
