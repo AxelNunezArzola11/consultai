@@ -53,7 +53,9 @@ const MILESTONE_TRANSITIONS: Record<MilestoneStatus, ReadonlySet<MilestoneStatus
   planned:          ms("funded", "cancelled"),
   funded:           ms("pending_approval", "submitted", "disputed", "cancelled"),
   submitted:        ms("verifying", "cancelled"),
-  verifying:        ms("pending_approval", "submitted", "paid"),
+  // verifying → failed/returned: payout item fails/returns after batch is submitted.
+  // These are real terminal transitions driven by PAYOUTS-ITEM.FAILED / RETURNED webhooks.
+  verifying:        ms("pending_approval", "submitted", "paid", "failed", "returned"),
   pending_approval: ms("verifying", "paid", "cancelled"),
   paid:             ms("disputed"),   // post-paid dispute possible
   disputed:         ms("paid", "cancelled"),

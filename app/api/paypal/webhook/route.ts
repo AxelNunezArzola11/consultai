@@ -39,7 +39,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { eq, sql as drizzleSql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import { verifyPayPalWebhook } from "@/lib/paypal/webhook";
 import { db } from "@/lib/db";
@@ -457,16 +457,26 @@ async function handlePayoutsItemSucceeded(
 ): Promise<void> {
   console.log("[webhook] PAYOUTS-ITEM.SUCCEEDED resource keys:", Object.keys(resource ?? {}));
 
-  const payoutItem   = resource?.payout_item as Record<string, unknown> | undefined;
-  const senderItemId = payoutItem?.sender_item_id as string | undefined; // UNVERIFIED — log
-  const payoutItemId = resource?.payout_item_id as string | undefined;
-  const transactionId = resource?.transaction_id as string | undefined;
+  const payoutItem    = resource?.payout_item    as Record<string, unknown> | undefined;
+  const senderItemId  = payoutItem?.sender_item_id as string | undefined;
+  const payoutItemId  = resource?.payout_item_id  as string | undefined;
+  const transactionId = resource?.transaction_id  as string | undefined;
+
+  // payout_item_fee: observed in batch GET (Spike 1: $0.25 on $1.00).
+  // Doc: https://developer.paypal.com/docs/api/payments.payouts-batch/v1/#definition-payout_item_details
+  // UNVERIFIED in webhook payload vs batch GET — log keys to confirm.
+  const payoutItemFeeObj = resource?.payout_item_fee as Record<string, string> | undefined;
+  const payoutFeeUsd     = payoutItemFeeObj?.value ?? null;
 
   console.log("[webhook] PAYOUTS-ITEM.SUCCEEDED fields:", {
-    senderItemIdKey: payoutItem ? Object.keys(payoutItem) : "(payout_item absent)",
-    senderItemId:   senderItemId   ?? "(absent — UNVERIFIED field)",
-    payoutItemId:   payoutItemId   ?? "(absent)",
-    transactionId:  transactionId  ?? "(absent)",
+    payoutItemKeys:  resource ? Object.keys(resource) : [],
+    payoutItemInner: payoutItem ? Object.keys(payoutItem) : "(payout_item absent)",
+    senderItemId:    senderItemId  ?? "(absent)",
+    payoutItemId:    payoutItemId  ?? "(absent)",
+    transactionId:   transactionId ?? "(absent)",
+    // Log presence/absence of fee field — never log the value
+    payoutItemFeePresent: payoutItemFeeObj !== undefined,
+    payoutFeeUsd:    payoutFeeUsd ?? "(absent)",
   });
 
   // Map by sender_item_id ("ITEM_{payment.id}") → payment.id
@@ -503,8 +513,11 @@ async function handlePayoutsItemSucceeded(
   await db
     .update(payments)
     .set({
-      status: "succeeded",
+      status:             "succeeded",
       paypalPayoutItemId: payoutItemId ?? paymentRow.paypalPayoutItemId,
+      // Store the payout item fee when present — borne by the platform
+      // (UNVERIFIED in webhook; observed in batch GET: $0.25 on $1.00)
+      ...(payoutFeeUsd !== null ? { payoutFeeUsd } : {}),
       updatedAt: new Date(),
     })
     .where(eq(payments.id, paymentRow.id));
@@ -539,10 +552,11 @@ async function handlePayoutsItemSucceeded(
     actor: "paypal_webhook",
     payload: {
       webhookEventId: eventId,
-      senderItemId:  senderItemId  ?? null,
-      payoutItemId:  payoutItemId  ?? null,
-      transactionId: transactionId ?? null,
-      milestoneId:   paymentRow.milestoneId,
+      senderItemId:   senderItemId  ?? null,
+      payoutItemId:   payoutItemId  ?? null,
+      transactionId:  transactionId ?? null,
+      payoutFeeUsd:   payoutFeeUsd  ?? null,
+      milestoneId:    paymentRow.milestoneId,
     },
   });
 
