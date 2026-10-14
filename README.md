@@ -1,17 +1,85 @@
 # ConsultAI
 
 AI-assisted consultant hiring platform with milestone payments.
+**PayPal "Business Solutions" track** — AI agent verifies deliverables against acceptance criteria before releasing funds.
 
-## Phase 1 — Milestone Payments (PayPal sandbox)
+Live demo: **https://consultai-rho.vercel.app**
 
-### Quick start
+## Quick start
 
 ```bash
+nvm use 20          # Node 20 required (see .nvmrc)
 npm install
 npm run dev        # uses --webpack (required for Bryntum/Tailwind v4)
-npm test           # unit tests (89 passing, 3 DB integration tests need DATABASE_URL)
+npm test           # 169 tests passing (all with DATABASE_URL, else 166)
 npm run build      # next build --webpack
 ```
+
+## Phase 2 — Delivery Agent (current)
+
+The Delivery Agent verifies a submitted GitHub PR against project acceptance criteria and proposes a payout.
+
+### How it works
+
+```
+Freelancer submits PR URL
+    → POST /api/delivery/verify
+    → GitHub REST: fetch PR details, files, check-runs, reviews
+    → Flag detection (WORKFLOW_FILE_MODIFIED / TEST_FILE_DELETED / DRAFT_PR / WRONG_AUTHOR)
+    → Deterministic checks: ci_passes, pr_merged, required_review_approved, files_present,
+                             no_workflow_or_test_tampering
+    → LLM step (Groq qwen3-32b, UNTRUSTED_DATA delimiters, Zod schema, fallback on error)
+    → Evidence ref validation (fabricated refs dropped)
+    → Policy engine (pure code — LLM CANNOT change decision):
+        AUTO_RELEASE_ELIGIBLE | REQUIRES_APPROVAL | REJECT_RECOMMENDED
+    → payment_proposal created (bound to head SHA)
+
+Company reviews in /project/[id]/delivery:
+    → POST /api/delivery/propose/approve
+    → SHA re-checked from GitHub — if changed: proposal SUPERSEDED, 409
+    → If approved: payout triggered via existing /api/paypal/payout
+```
+
+### Design invariants
+
+- **LLM cannot change the policy decision** — `evaluatePolicy()` is pure deterministic code
+- **Injection defense** — PR body/title wrapped in `<<UNTRUSTED_DATA>>` delimiters
+- **Fabricated evidence refs dropped** — `validateEvidenceRefs()` validates all LLM refs against fetched data
+- **No money tools in delivery modules** — asserted by test
+- **SHA bound to proposal** — re-fetched at approval; mismatch → SUPERSEDED
+- **Auto-release disabled by default** — `AUTO_RELEASE_LIMIT_USD=0` fail-closed
+
+### New routes
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/auth/set-role` | — | Sets signed httpOnly role cookie (demo auth) |
+| `POST` | `/api/delivery/verify` | any role | Full verification run |
+| `GET` | `/api/delivery/run/[runId]` | any role | Poll run status + steps + proposal |
+| `POST` | `/api/delivery/propose/approve` | company | Approve/reject proposal (SHA re-check) |
+
+### Freelancer flow
+
+1. Navigate to `/deliver/[milestoneId]` (share link from company)
+2. Enter GitHub PR URL → submit
+3. Watch verification steps appear
+4. Result shows policy decision + justification
+
+### Company flow
+
+1. Navigate to `/project/[id]/delivery`
+2. See all verification runs for this project
+3. Activity stream shows each step with expandable evidence
+4. Approval card: criteria checklist (objective/subjective badges), flags, justification, bound SHA, Approve/Reject buttons
+
+### Demo scenarios
+
+Three prepared scenarios are available in the freelancer submit form (demo-only labels):
+- **All green** — PR passes all checks, merged, no flags
+- **Failing CI** — CI check failing
+- **Workflow modified** — `.github/workflows/` file touched → WORKFLOW_FILE_MODIFIED flag raised
+
+Requires `DELIVERY_AGENT_REPO` and `GITHUB_TOKEN` to be configured for real GitHub calls.
 
 ---
 
@@ -22,15 +90,21 @@ npm run build      # next build --webpack
 Set ALL of the following in Vercel → Settings → Environment Variables **before** deploying.
 None of these have hardcoded defaults — the app will throw a clear error at startup if any are missing.
 
-| Variable | Description |
-|---|---|
-| `APP_BASE_URL` | Stable production domain, e.g. `https://your-app.vercel.app` — no trailing slash. Used to build webhook callback URLs. Never use `VERCEL_URL` or `window.location`. |
-| `DATABASE_URL` | Neon connection string (pooled) |
-| `PAYPAL_ENV` | `sandbox` or `live` — controls SDK script URL and API base |
-| `NEXT_PUBLIC_PAYPAL_CLIENT_ID` | PayPal Client ID (public — used in browser for SDK v6) |
-| `PAYPAL_CLIENT_ID` | PayPal Client ID (server-side duplicate for API auth) |
-| `PAYPAL_CLIENT_SECRET` | PayPal Client Secret (**sensitive** — Vercel will not allow read-back) |
-| `PAYPAL_WEBHOOK_ID` | Bare 17-char Webhook ID from PayPal Developer Dashboard. **NOT the WH-... event id.** |
+| Variable | Description | Phase |
+|---|---|---|
+| `APP_BASE_URL` | Stable production domain, e.g. `https://your-app.vercel.app` — no trailing slash. Used to build webhook callback URLs. Never use `VERCEL_URL` or `window.location`. | 0 |
+| `DATABASE_URL` | Neon connection string (pooled) | 0 |
+| `PAYPAL_ENV` | `sandbox` or `live` — controls SDK script URL and API base | 1 |
+| `NEXT_PUBLIC_PAYPAL_CLIENT_ID` | PayPal Client ID (public — used in browser for SDK v6) | 1 |
+| `PAYPAL_CLIENT_ID` | PayPal Client ID (server-side duplicate for API auth) | 1 |
+| `PAYPAL_CLIENT_SECRET` | PayPal Client Secret (**sensitive** — Vercel will not allow read-back) | 1 |
+| `PAYPAL_WEBHOOK_ID` | Bare 17-char Webhook ID from PayPal Developer Dashboard. **NOT the WH-... event id.** | 1 |
+| `ROLE_COOKIE_SECRET` | Min 32 chars. Signs the role cookie. Generate: `openssl rand -hex 32` | 2 |
+| `ALLOW_LIVE` | Set `true` to permit `PAYPAL_ENV=live`. Omit or set `false` to block (fail-closed guard). | 2 |
+| `GITHUB_TOKEN` | Fine-grained read-only PAT — Contents/PRs/Checks read on the demo repo | 2 |
+| `DELIVERY_AGENT_REPO` | `owner/repo` — restricts verification to this repo only | 2 |
+| `AUTO_RELEASE_LIMIT_USD` | Auto-release limit in USD. Default `0` = disabled (fail-closed). | 2 |
+| `GROQ_API_KEY` | Groq API key for LLM step. Absent = deterministic fallback used. | 2 |
 
 > **PAYPAL_WEBHOOK_ID vs event id**: The Dashboard webhook registration ID is a bare 17-character alphanumeric string (e.g. `1A2B3C4D5E6F7G8`). PayPal webhook event IDs start with `WH-` (e.g. `WH-1234-...`). These are different. Use the bare registration ID in `PAYPAL_WEBHOOK_ID`.
 
@@ -93,8 +167,51 @@ Migrations are in `lib/db/migrations/`. The `audit_log` table has DB-level trigg
 ### 5. Build notes
 
 - **Compiler**: `next build --webpack` — never remove the `--webpack` flag (required for Bryntum/Tailwind v4).
-- **Node version**: 20 required (drizzle-kit fails on Node < 18).
-- **Tests**: `npm test` runs Vitest. DB integration tests in `lib/db/audit.test.ts` require `DATABASE_URL` and are skipped without it.
+- **Node version**: `20` required (see `.nvmrc`). Vitest 4 requires Node ≥ 20. Use `nvm use 20`.
+- **Tests**: `npm test` runs Vitest — 169 tests across 7 files. DB integration tests require `DATABASE_URL`.
+- **Migration**: Phase 2 tables applied — run `npx tsx lib/db/migrations/run-0002.ts` on a new Neon branch.
+
+### 6. Post-deploy curl checks (Phase 2)
+
+```bash
+BASE=https://consultai-rho.vercel.app
+
+# 1. No role cookie → payout 403
+curl -s -o/dev/null -w "%{http_code}" -X POST $BASE/api/paypal/payout \
+  -H "Content-Type: application/json" -d '{"paymentId":"x","recipientEmail":"a@b.com"}'
+# → 403
+
+# 2. Set company cookie
+curl -s -c /tmp/jar -X POST $BASE/api/auth/set-role \
+  -H "Content-Type: application/json" -d '{"role":"company"}'
+# → {"ok":true,"role":"company"}
+
+# 3. Payout with company cookie — passes auth, 404 (no payment row)
+curl -s -b /tmp/jar -X POST $BASE/api/paypal/payout \
+  -H "Content-Type: application/json" -d '{"paymentId":"nonexistent","recipientEmail":"a@b.com"}'
+# → {"error":"Payment not found"}
+
+# 4. Verify route — missing milestoneId → 400
+curl -s -o/dev/null -w "%{http_code}" -b /tmp/jar -X POST $BASE/api/delivery/verify \
+  -H "Content-Type: application/json" -d '{}'
+# → 400
+
+# 5. Run poll — unknown runId → 404
+curl -s -o/dev/null -w "%{http_code}" -b /tmp/jar $BASE/api/delivery/run/nonexistent
+# → 404
+
+# 6. Approve — missing proposalId → 400
+curl -s -o/dev/null -w "%{http_code}" -b /tmp/jar -X POST $BASE/api/delivery/propose/approve \
+  -H "Content-Type: application/json" -d '{}'
+# → 400
+
+# 7. Freelancer cookie → approve 403
+curl -s -c /tmp/jar2 -X POST $BASE/api/auth/set-role \
+  -H "Content-Type: application/json" -d '{"role":"freelancer"}'
+curl -s -o/dev/null -w "%{http_code}" -b /tmp/jar2 -X POST $BASE/api/delivery/propose/approve \
+  -H "Content-Type: application/json" -d '{"proposalId":"x","decision":"approved","recipientEmail":"a@b.com"}'
+# → 403
+```
 
 ---
 
