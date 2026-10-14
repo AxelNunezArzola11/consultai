@@ -111,6 +111,37 @@ export const evidenceSourceTypeEnum = pgEnum("evidence_source_type", [
   "provided_link",
 ]);
 
+export const verificationStatusEnum = pgEnum("verification_status", [
+  "pending",
+  "running",
+  "completed",
+  "failed",
+]);
+
+export const proposalStatusEnum = pgEnum("proposal_status", [
+  /** Awaiting human or auto decision */
+  "pending",
+  /** Auto-release eligible and within limit — payout can fire */
+  "auto_release_eligible",
+  /** Requires human approval */
+  "requires_approval",
+  /** LLM or deterministic recommends reject */
+  "reject_recommended",
+  /** Human approved — payout issued */
+  "approved",
+  /** Human rejected */
+  "rejected",
+  /** Head SHA changed after verification — must re-verify */
+  "superseded",
+]);
+
+export const agentStepStatusEnum = pgEnum("agent_step_status", [
+  "pending",
+  "running",
+  "done",
+  "error",
+]);
+
 // ---------------------------------------------------------------------------
 // companies
 // ---------------------------------------------------------------------------
@@ -476,6 +507,154 @@ export const paypalWebhookDeliveries = pgTable("paypal_webhook_deliveries", {
   eventId: text("event_id").primaryKey(),
   eventType: text("event_type").notNull(),
   receivedAt: timestamp("received_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// verification_runs
+//
+// One run per "verify this PR for this milestone" invocation.
+// Split into short server calls (fetch → verify → explain), each persisted as
+// an agent_step. A timeout loses nothing — the run can be resumed from the
+// last completed step.
+//
+// Binding: a payment_proposal is bound to the run id + head_sha.
+// ---------------------------------------------------------------------------
+
+export const verificationRuns = pgTable("verification_runs", {
+  id: text("id").primaryKey(),
+  milestoneId: text("milestone_id")
+    .notNull()
+    .references(() => milestones.id),
+  /** PR URL exactly as submitted by freelancer */
+  prUrl: text("pr_url").notNull(),
+  /** GitHub owner extracted from PR URL */
+  prOwner: text("pr_owner").notNull(),
+  /** GitHub repo extracted from PR URL */
+  prRepo: text("pr_repo").notNull(),
+  /** GitHub PR number extracted from PR URL */
+  prNumber: integer("pr_number").notNull(),
+  /** HEAD SHA at time of verification (re-checked before payout) */
+  headSha: text("head_sha"),
+  /** PR author login */
+  prAuthor: text("pr_author"),
+  /** Whether PR was merged at time of check */
+  prMerged: boolean("pr_merged"),
+  /** Whether PR was draft at time of check */
+  prDraft: boolean("pr_draft"),
+  /**
+   * Objective criterion results — array of:
+   * { criterionId, kind: "objective"|"subjective", met: bool|null, evidence: string[] }
+   */
+  criteriaResults: jsonb("criteria_results"),
+  /**
+   * Flags raised — array of strings, e.g.:
+   * "WORKFLOW_FILE_MODIFIED", "TEST_FILE_DELETED", "DRAFT_PR",
+   * "WRONG_AUTHOR", "SHA_MISMATCH"
+   */
+  flags: jsonb("flags"),
+  /** LLM model id used for this run */
+  llmModelId: text("llm_model_id"),
+  /** Prompt version string (for reproducibility) */
+  promptVersion: text("prompt_version"),
+  /** Duration in milliseconds for the full run */
+  durationMs: integer("duration_ms"),
+  /** Policy decision output */
+  policyDecision: text("policy_decision"),
+  /** LLM-generated justification (plain language, evidence-cited) */
+  justification: text("justification"),
+  /** True if justification came from template fallback (LLM unavailable) */
+  justificationFallback: boolean("justification_fallback").default(false),
+  status: verificationStatusEnum("status").notNull().default("pending"),
+  /** Freelancer login who submitted (from cookie/session) */
+  submittedBy: text("submitted_by"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// agent_steps
+//
+// Ordered steps within a verification run — forms the activity stream.
+// Each step is persisted as it completes so a timeout loses nothing.
+// ---------------------------------------------------------------------------
+
+export const agentSteps = pgTable("agent_steps", {
+  id: text("id").primaryKey(),
+  runId: text("run_id")
+    .notNull()
+    .references(() => verificationRuns.id),
+  /** 0-based sequence within the run */
+  seq: integer("seq").notNull().default(0),
+  /** Tool or phase name, e.g. "fetchPRDetails", "verifyAcceptanceCriteria" */
+  tool: text("tool").notNull(),
+  /** Short summary of inputs (no secrets or raw payloads) */
+  inputSummary: text("input_summary"),
+  /** Short summary of output */
+  outputSummary: text("output_summary"),
+  /**
+   * Evidence references — array of { kind, ref, url? }
+   * kind: "commit_sha" | "check_name" | "file_path" | "review_id"
+   * All refs are validated against fetched PR data before storage.
+   * Fabricated refs (not present in fetched data) are dropped.
+   */
+  evidenceRefs: jsonb("evidence_refs"),
+  status: agentStepStatusEnum("status").notNull().default("pending"),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  /** Error message if status=error */
+  errorMessage: text("error_message"),
+});
+
+// ---------------------------------------------------------------------------
+// payment_proposals
+//
+// A proposal to pay out a milestone, bound to a verification run + head SHA.
+// The policy engine sets the status field — LLM output NEVER changes it.
+// Re-fetch head SHA at approval time and right before payout; if changed,
+// mark SUPERSEDED and require re-verification.
+// ---------------------------------------------------------------------------
+
+export const paymentProposals = pgTable("payment_proposals", {
+  id: text("id").primaryKey(),
+  milestoneId: text("milestone_id")
+    .notNull()
+    .references(() => milestones.id),
+  runId: text("run_id")
+    .notNull()
+    .references(() => verificationRuns.id),
+  /**
+   * HEAD SHA at the time this proposal was created.
+   * Validated again at approval and immediately before payout.
+   * If it changes, status → SUPERSEDED.
+   */
+  boundHeadSha: text("bound_head_sha").notNull(),
+  /** Payout amount in USD */
+  amountUsd: decimal("amount_usd", { precision: 10, scale: 2 }).notNull(),
+  /**
+   * Policy decision (pure code output — never LLM-determined):
+   *   AUTO_RELEASE_ELIGIBLE | REQUIRES_APPROVAL | REJECT_RECOMMENDED
+   */
+  policyDecision: text("policy_decision").notNull(),
+  /** LLM justification (plain language, evidence-cited, or template fallback) */
+  justification: text("justification"),
+  /** True if justification came from template fallback */
+  justificationFallback: boolean("justification_fallback").default(false),
+  status: proposalStatusEnum("status").notNull().default("pending"),
+  /** Who approved/rejected — email, 'auto', or null */
+  decidedBy: text("decided_by"),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  /** Notes from human reviewer */
+  decisionNotes: text("decision_notes"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
 });

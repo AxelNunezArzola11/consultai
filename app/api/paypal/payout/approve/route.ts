@@ -25,10 +25,28 @@ import {
   type PaymentStatus,
 } from "@/lib/state-machines/milestone-payment";
 import { writeAuditLog } from "@/lib/db/audit";
+import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // ── Auth: require role=company cookie ─────────────────────────────────────
+  const role = await getRoleFromCookie(req.headers.get("cookie"));
+  if (role !== "company") {
+    return NextResponse.json({ error: "Forbidden: company role required" }, { status: 403 });
+  }
+
+  // ── Rate limit: 10 approvals per IP per 60 s ──────────────────────────────
+  const ip = getIp(req);
+  const { ok, retryAfterSec } = checkRateLimit("payout-approve", ip, 10, 60);
+  if (!ok) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
+  }
+
   try {
     const body           = await req.json().catch(() => null);
     const approvalId     = body?.approvalId     as string | undefined;

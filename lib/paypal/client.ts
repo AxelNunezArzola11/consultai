@@ -13,6 +13,22 @@
  * Doc: https://developer.paypal.com/api/rest/requests/#http-request-headers
  */
 
+/**
+ * ALLOW_LIVE guard — fail closed.
+ * Refuse to run against live PayPal unless ALLOW_LIVE=true is explicitly set.
+ * This prevents accidental use of live credentials in non-production environments.
+ */
+export function assertNotLiveWithoutPermission(): void {
+  const env = (process.env.PAYPAL_ENV ?? "sandbox").toLowerCase();
+  if (env === "live" && process.env.ALLOW_LIVE !== "true") {
+    throw new Error(
+      "PAYPAL_ENV=live is set but ALLOW_LIVE is not 'true'. " +
+        "Set ALLOW_LIVE=true in env to explicitly permit live PayPal calls. " +
+        "This check fails closed to prevent accidental live API usage."
+    );
+  }
+}
+
 /** API base URLs per environment. */
 const PAYPAL_BASE_URLS: Record<string, string> = {
   sandbox: "https://api-m.sandbox.paypal.com",
@@ -25,6 +41,7 @@ const PAYPAL_BASE_URLS: Record<string, string> = {
  * Throws only if neither PAYPAL_BASE_URL nor a recognised PAYPAL_ENV is set.
  */
 export function getPayPalBaseUrl(): string {
+  assertNotLiveWithoutPermission();
   const explicit = process.env.PAYPAL_BASE_URL;
   if (explicit) return explicit.replace(/\/$/, "");
 
