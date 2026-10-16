@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { notFound } from "next/navigation";
 import { MoneyFlowPanel } from "@/components/payments/MoneyFlowPanel";
+import { MilestonesClientExtensions } from "./MilestonesClientExtensions";
 
 /**
  * Milestones page — Phase 1 Step 6.
@@ -73,6 +74,17 @@ export default async function MilestonesPage({
           <p className="text-muted-foreground text-sm mt-1">Milestones &amp; Payments</p>
         </div>
       </div>
+
+      {/* Client-side extensions: compliance bar, meetings, payment chat */}
+      <MilestonesClientExtensions
+        projectId={id}
+        milestones={milestoneList.map((m) => ({
+          id: m.id,
+          title: m.title,
+          status: m.status,
+          budgetUsd: m.budgetUsd,
+        }))}
+      />
 
       {milestoneList.length === 0 ? (
         <div className="rounded-xl border bg-muted/30 p-8 text-center">

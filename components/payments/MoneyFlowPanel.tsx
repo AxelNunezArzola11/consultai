@@ -161,11 +161,23 @@ export function MoneyFlowPanel({
   stageRef.current = stage;
 
   // ── Poll ──────────────────────────────────────────────────────────────────
+  // Consecutive error counter for back-off — resets on success
+  const pollErrorCountRef = useRef(0);
+
   const poll = useCallback(async () => {
     try {
-      const res  = await fetch(`/api/milestone-status/${milestoneId}`, { cache: "no-store" });
-      if (!res.ok) { setPollError(true); return; }
+      const res = await fetch(`/api/milestone-status/${milestoneId}`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(8000), // 8 s timeout — avoids hanging on network change
+      });
+      if (!res.ok) {
+        pollErrorCountRef.current += 1;
+        setPollError(true);
+        return;
+      }
       const data = await res.json() as MilestoneState;
+      // Success — reset error tracking
+      pollErrorCountRef.current = 0;
       setPollError(false);
 
       // Only update state when something changed
@@ -189,8 +201,13 @@ export function MoneyFlowPanel({
         if (to === "failed")           toast.error(`Payout failed (was ${from})`);
         if (to === "returned")         toast.warning("Payout returned (unclaimed)");
       }
-    } catch {
+    } catch (err) {
+      // AbortError from timeout or ERR_NETWORK_CHANGED — both treated the same
+      pollErrorCountRef.current += 1;
       setPollError(true);
+      if (pollErrorCountRef.current === 1) {
+        console.warn("[MoneyFlowPanel] Poll error (will retry):", err);
+      }
     }
   }, [milestoneId]);
 
@@ -198,9 +215,15 @@ export function MoneyFlowPanel({
     // Only poll when not in a terminal state
     if (TERMINAL.includes(stage)) return;
 
-    const id = setInterval(() => { void poll(); }, POLL_MS);
+    // Use exponential back-off when errors accumulate (max 30 s)
+    const effectivePollMs =
+      pollErrorCountRef.current === 0
+        ? POLL_MS
+        : Math.min(POLL_MS * Math.pow(2, pollErrorCountRef.current - 1), 30_000);
+
+    const id = setInterval(() => { void poll(); }, effectivePollMs);
     return () => clearInterval(id);
-  }, [poll, stage]);
+  }, [poll, stage, pollError]);
 
   // ── Fund button callback ───────────────────────────────────────────────────
   function handleFunded(result: FundResult) {

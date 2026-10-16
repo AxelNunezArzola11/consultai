@@ -117,6 +117,17 @@ export const disputeStatusEnum = pgEnum("dispute_status", [
   "open",
   "resolved",
   "escalated",
+  // Phase 6 additions — match PayPal dispute_state values (UNVERIFIED until sandbox observed)
+  "under_review",               // UNDER_PAYPAL_REVIEW
+  "waiting_for_buyer",          // REQUIRED_OTHER_PARTY_ACTION (buyer must respond)
+  "waiting_for_seller",         // REQUIRED_ACTION (seller must respond — our state)
+  "closed",                     // terminal — no further action possible
+]);
+
+export const disputeEvidenceStatusEnum = pgEnum("dispute_evidence_status", [
+  "not_submitted",  // default — no evidence sent yet
+  "submitted",      // evidence successfully sent to PayPal
+  "failed",         // submission attempt failed
 ]);
 
 export const evidenceSourceTypeEnum = pgEnum("evidence_source_type", [
@@ -514,12 +525,51 @@ export const disputes = pgTable("disputes", {
     .notNull()
     .references(() => milestones.id),
   paymentId: text("payment_id").references(() => payments.id),
-  paypalDisputeId: text("paypal_dispute_id"),
+  paypalDisputeId: text("paypal_dispute_id").unique(),
   status: disputeStatusEnum("status").notNull().default("open"),
   claimedBy: text("claimed_by"),
-  /** [{type, url, description, submitted_at}] */
+
+  // Phase 6: richer dispute metadata from PayPal webhook resource
+  /** PayPal dispute_state — e.g. REQUIRED_ACTION, UNDER_PAYPAL_REVIEW */
+  paypalStatus: text("paypal_status"),
+  /** PayPal dispute reason code — e.g. ITEM_NOT_RECEIVED, UNAUTHORIZED_TRANSACTION */
+  disputeReason: text("dispute_reason"),
+  /** PayPal dispute_channel — e.g. INTERNAL, EXTERNAL */
+  disputeChannel: text("dispute_channel"),
+  /** PayPal dispute_life_cycle_stage — e.g. INQUIRY, CHARGEBACK */
+  disputeLifeCycleStage: text("dispute_life_cycle_stage"),
+  /** USD amount in dispute from PayPal dispute_amount.value */
+  disputeAmountUsd: decimal("dispute_amount_usd", { precision: 10, scale: 2 }),
+  /** ISO 4217 code from dispute_amount.currency_code */
+  disputeAmountCurrency: text("dispute_amount_currency"),
+
+  // Phase 6: evidence packet
+  /**
+   * Evidence items assembled from DB — array of:
+   * { type: string, url: string | null, description: string, source: string, submitted_at: string | null }
+   */
   evidence: jsonb("evidence"),
+  evidenceStatus: disputeEvidenceStatusEnum("evidence_status")
+    .notNull()
+    .default("not_submitted"),
+  /** ISO timestamp when evidence was successfully submitted to PayPal */
+  evidenceSubmittedAt: timestamp("evidence_submitted_at", { withTimezone: true }),
+
+  // Phase 6: settlement offer (UNVERIFIED until sandbox call)
+  /** Offer amount in USD proposed by the platform — NULL until offer made */
+  offerAmountUsd: decimal("offer_amount_usd", { precision: 10, scale: 2 }),
+  /** ISO timestamp when the offer was successfully submitted to PayPal */
+  offerSubmittedAt: timestamp("offer_submitted_at", { withTimezone: true }),
+
+  // Phase 6: resolution
+  /** Outcome after resolution — e.g. RESOLVED_BUYER_FAVOR, RESOLVED_SELLER_FAVOR */
+  resolutionOutcome: text("resolution_outcome"),
+
+  /** LLM-generated written response / resolution suggestion */
   agentResolution: text("agent_resolution"),
+  /** Human-edited version of the agent's suggested response (set before submission) */
+  humanEditedResponse: text("human_edited_response"),
+
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

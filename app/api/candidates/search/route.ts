@@ -24,18 +24,24 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "projectId required" }, { status: 400 });
   }
 
+  // Shared column selection (includes vetting fields for compliance view)
+  const COLS = {
+    id: candidates.id,
+    name: candidates.name,
+    email: candidates.email,
+    githubHandle: candidates.githubHandle,
+    trustScore: candidates.trustScore,
+    status: candidates.status,
+    rank: candidates.rank,
+    vettingConsentAt: candidates.vettingConsentAt,
+    vettingRanAt: candidates.vettingRanAt,
+    canDo: candidates.canDo,
+  };
+
   if (!query) {
     // Return all candidates if no query
     const results = await db
-      .select({
-        id: candidates.id,
-        name: candidates.name,
-        email: candidates.email,
-        githubHandle: candidates.githubHandle,
-        trustScore: candidates.trustScore,
-        status: candidates.status,
-        rank: candidates.rank,
-      })
+      .select(COLS)
       .from(candidates)
       .where(eq(candidates.projectId, projectId))
       .orderBy(candidates.rank);
@@ -47,15 +53,7 @@ export async function GET(request: NextRequest) {
     // Primary: Postgres full-text search
     // search_vector is populated by trigger on INSERT/UPDATE
     const results = await db
-      .select({
-        id: candidates.id,
-        name: candidates.name,
-        email: candidates.email,
-        githubHandle: candidates.githubHandle,
-        trustScore: candidates.trustScore,
-        status: candidates.status,
-        rank: candidates.rank,
-      })
+      .select(COLS)
       .from(candidates)
       .where(
         sql`${candidates.projectId} = ${projectId}
@@ -71,15 +69,7 @@ export async function GET(request: NextRequest) {
   } catch {
     // Fallback: ILIKE if search_vector not populated or FTS error
     const results = await db
-      .select({
-        id: candidates.id,
-        name: candidates.name,
-        email: candidates.email,
-        githubHandle: candidates.githubHandle,
-        trustScore: candidates.trustScore,
-        status: candidates.status,
-        rank: candidates.rank,
-      })
+      .select(COLS)
       .from(candidates)
       .where(
         and(

@@ -46,11 +46,37 @@ export const maxDuration = 60; // Vercel Hobby: max 300s; 60s is plenty for brie
 function getLLM() {
   const provider = process.env.LLM_PROVIDER ?? "groq";
   if (provider === "groq") {
-    const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      throw new Error("GROQ_API_KEY environment variable is not set.");
+    }
+    const groq = createGroq({ apiKey });
     const model = process.env.LLM_GROQ_MODEL ?? "qwen/qwen3-32b";
     return groq(model);
   }
   throw new Error(`LLM_PROVIDER "${provider}" not supported. Use "groq".`);
+}
+
+// ── Classify a Groq / AI SDK error into a user-readable message ──────────────
+function classifyLLMError(err: unknown): string {
+  if (!(err instanceof Error)) return "AI service error";
+  const msg = err.message;
+  if (msg.includes("GROQ_API_KEY") || msg.includes("not set")) {
+    return "AI service is not configured. Set GROQ_API_KEY to enable the chat assistant.";
+  }
+  if (msg.includes("rate limit") || msg.includes("429") || msg.includes("Rate limit")) {
+    return "Groq rate limit reached. Please wait a moment and try again.";
+  }
+  if (msg.includes("401") || msg.includes("Unauthorized") || msg.includes("invalid_api_key")) {
+    return "Invalid Groq API key. Check the GROQ_API_KEY environment variable.";
+  }
+  if (msg.includes("503") || msg.includes("overloaded") || msg.includes("unavailable")) {
+    return "The AI service is temporarily unavailable. Please retry in a few seconds.";
+  }
+  if (msg.includes("timeout") || msg.includes("ETIMEDOUT") || msg.includes("network")) {
+    return "Connection to the AI service timed out. Please retry.";
+  }
+  return `AI service error: ${msg.slice(0, 200)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +193,13 @@ export async function POST(req: NextRequest) {
   });
 
   // --- Stream ---
-  const llm = getLLM();
+  let llm;
+  try {
+    llm = getLLM();
+  } catch (err) {
+    console.error("[brief-agent] getLLM failed:", err);
+    return Response.json({ error: classifyLLMError(err) }, { status: 503 });
+  }
 
   // streamText requires either `messages` (non-empty) or `prompt`.
   // When there are no prior messages, use the brief as prompt.
@@ -195,7 +227,13 @@ export async function POST(req: NextRequest) {
         },
       };
 
-  const result = streamText(streamArgs as Parameters<typeof streamText>[0]);
+  let result;
+  try {
+    result = streamText(streamArgs as Parameters<typeof streamText>[0]);
+  } catch (err) {
+    console.error("[brief-agent] streamText threw synchronously:", err);
+    return Response.json({ error: classifyLLMError(err) }, { status: 503 });
+  }
 
   return result.toUIMessageStreamResponse();
 }

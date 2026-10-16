@@ -9,6 +9,7 @@ import { projects, milestones } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DeleteProjectButton } from "@/components/shared/DeleteProjectButton";
 
 /**
  * Company dashboard — server component.
@@ -83,7 +84,13 @@ async function ProjectCard({
               {project.title}
             </Link>
           </CardTitle>
-          <Badge variant="outline">{project.status}</Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline">{project.status}</Badge>
+            <DeleteProjectButton
+              projectId={project.id}
+              projectTitle={project.title}
+            />
+          </div>
         </div>
         {project.rawBrief && (
           <p className="text-sm text-muted-foreground line-clamp-2 mt-1">

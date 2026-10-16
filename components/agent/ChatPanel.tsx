@@ -38,6 +38,53 @@ interface ChatPanelProps {
 }
 
 // ---------------------------------------------------------------------------
+// Network-error classifier
+// ---------------------------------------------------------------------------
+
+function classifyError(err: unknown): string {
+  if (err instanceof Error) {
+    const raw = err.message;
+
+    // The DefaultChatTransport throws new Error(await response.text()).
+    // The response body may be our JSON error envelope {"error":"..."}.
+    // Try to extract the human-readable message from it.
+    let msg = raw;
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof parsed.error === "string" && parsed.error) {
+        msg = parsed.error;
+      }
+    } catch {
+      // not JSON — use raw message
+    }
+
+    // ERR_NETWORK_CHANGED / Failed to fetch / NetworkError
+    if (
+      msg.includes("ERR_NETWORK_CHANGED") ||
+      msg.includes("Failed to fetch") ||
+      msg.includes("NetworkError") ||
+      msg.includes("network")
+    ) {
+      return "Network connection changed. Please check your connection and try again.";
+    }
+    if (msg.includes("rate limit") || msg.includes("429") || msg.includes("Rate limit")) {
+      return "Rate limit reached. Please wait a moment before retrying.";
+    }
+    if (msg.includes("timeout") || msg.includes("ETIMEDOUT")) {
+      return "Request timed out. The AI service may be busy — please retry.";
+    }
+    if (msg.includes("GROQ_API_KEY") || msg.includes("not configured") || msg.includes("not set")) {
+      return "The AI service is not configured on the server. Contact support.";
+    }
+    if (msg.includes("Forbidden") || msg.includes("403")) {
+      return "Access denied — please reload and try again.";
+    }
+    return msg || "LLM request failed";
+  }
+  return "LLM request failed";
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -52,6 +99,11 @@ export function ChatPanel({
   const [input, setInput] = useState(initialBrief ?? "");
   const [charCount, setCharCount] = useState((initialBrief ?? "").length);
   const hasAutoSent = useRef(false);
+
+  // Inline error banner (non-fatal: user can dismiss and retry without switching to fallback)
+  const [inlineError, setInlineError] = useState<string | null>(null);
+  // Count consecutive errors — after 2, escalate to fallback
+  const errorCountRef = useRef(0);
 
   // Build transport once (stable reference)
   const transport = useRef(
@@ -68,8 +120,16 @@ export function ChatPanel({
   } = useChat({
     transport,
     onError: (err) => {
-      console.error("[ChatPanel] useChat error:", err);
-      onLLMError(err.message ?? "LLM request failed");
+      const msg = classifyError(err);
+      console.error("[ChatPanel] useChat error:", msg, err);
+      errorCountRef.current += 1;
+      if (errorCountRef.current >= 2) {
+        // Escalate to parent fallback editor after 2 consecutive failures
+        onLLMError(msg);
+      } else {
+        // Show inline dismissible banner — user can retry
+        setInlineError(msg);
+      }
     },
   });
 
@@ -92,6 +152,9 @@ export function ChatPanel({
     if (!text || status === "streaming" || status === "submitted") return;
     setInput("");
     setCharCount(0);
+    // Clear inline error and reset counter on new send
+    setInlineError(null);
+    errorCountRef.current = 0;
     sendMessage({ text });
   }, [input, status, sendMessage]);
 
@@ -106,6 +169,19 @@ export function ChatPanel({
 
   return (
     <div className="flex flex-col h-full">
+      {/* Inline error banner */}
+      {inlineError && (
+        <div className="mx-3 mt-2 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+          <span className="flex-1">⚠️ {inlineError}</span>
+          <button
+            onClick={() => setInlineError(null)}
+            className="shrink-0 font-medium underline underline-offset-2 hover:no-underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
         {messages.length === 0 && !isLoading && (

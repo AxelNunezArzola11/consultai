@@ -1,5 +1,5 @@
 /**
- * /api/paypal/webhook — PayPal webhook handler (Phase 1)
+ * /api/paypal/webhook — PayPal webhook handler (Phase 1 + Phase 6 disputes)
  *
  * Processing order (strict — per Phase 1 rules):
  *   1. Read raw body (request.text() → Buffer)
@@ -14,7 +14,7 @@
  *   In-memory sets MUST NOT be used (Vercel serverless = new process per invocation).
  *
  * State machine:
- *   Transitions enforced by assertMilestoneTransition / assertPaymentTransition.
+ *   Transitions enforced by assertMilestoneTransition / assertPaymentTransition / assertDisputeTransition.
  *   Out-of-order events that arrive when already in the target state are idempotent (no-op).
  *
  * Event routing (verified Spike 3 observations):
@@ -23,7 +23,18 @@
  *   PAYOUTSBATCH.*        → resource.batch_header.payout_batch_id (batch-level only, no item detail)
  *   PAYOUTS-ITEM.*        → resource.payout_item.sender_item_id ("ITEM_{payment.id}")
  *                           resource.payout_item_id, resource.transaction_id
+ *                           sender_item_id UNVERIFIED in live webhook (confirmed from docs)
  *   DISPUTE.CREATED       → resource.dispute_id, resource.disputed_transactions[0].buyer_transaction_id
+ *                           resource.dispute_amount, resource.reason, resource.dispute_state
+ *   DISPUTE.UPDATED       → same shape as CREATED; resource.dispute_state updated
+ *                           UNVERIFIED — event name not confirmed in sandbox
+ *   DISPUTE.RESOLVED      → resource.dispute_outcome.outcome_code (UNVERIFIED)
+ *                           UNVERIFIED — event name not confirmed in sandbox
+ *
+ * Webhook events to register (PayPal Developer Dashboard → sandbox → Webhooks):
+ *   CUSTOMER.DISPUTE.CREATED   (already registered)
+ *   CUSTOMER.DISPUTE.UPDATED   (register this — UNVERIFIED event name; from docs)
+ *   CUSTOMER.DISPUTE.RESOLVED  (register this — UNVERIFIED event name; from docs)
  *
  * Env vars (all required):
  *   PAYPAL_WEBHOOK_ID  — bare 17-char Dashboard webhook registration ID (NOT the WH-... event id)
@@ -47,6 +58,7 @@ import {
   paypalWebhookDeliveries,
   payments,
   milestones,
+  disputes,
 } from "@/lib/db/schema";
 import {
   assertMilestoneTransition,
@@ -54,6 +66,11 @@ import {
   type MilestoneStatus,
   type PaymentStatus,
 } from "@/lib/state-machines/milestone-payment";
+import {
+  assertDisputeTransition,
+  paypalStateToDisputeStatus,
+  type DisputeStatus,
+} from "@/lib/state-machines/dispute";
 import { writeAuditLog } from "@/lib/db/audit";
 
 export const dynamic = "force-dynamic";
@@ -195,6 +212,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       case "CUSTOMER.DISPUTE.CREATED":
         await handleDisputeCreated(resource, eventId);
+        break;
+
+      // Phase 6: additional dispute events
+      // UNVERIFIED event names — not yet observed in sandbox; from PayPal event-names docs
+      // Register in PayPal Developer Dashboard alongside CUSTOMER.DISPUTE.CREATED
+      case "CUSTOMER.DISPUTE.UPDATED":
+        await handleDisputeUpdated(resource, eventId);
+        break;
+
+      case "CUSTOMER.DISPUTE.RESOLVED":
+        await handleDisputeResolved(resource, eventId);
         break;
 
       default:
@@ -665,16 +693,129 @@ async function handlePayoutsItemFailed(
   console.log(`[webhook] ${eventType}: payment`, paymentRow.id, "→ failed; milestone →", milestone?.status);
 }
 
+// ---------------------------------------------------------------------------
+// Dispute helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the common dispute fields from a CUSTOMER.DISPUTE.* resource payload.
+ * Fields marked UNVERIFIED have not been observed in a live sandbox event.
+ */
+function extractDisputeResource(resource: Record<string, unknown> | undefined) {
+  const txns = resource?.disputed_transactions as Array<Record<string, unknown>> | undefined;
+  // dispute_amount: { currency_code: string, value: string } — UNVERIFIED in webhook
+  const disputeAmount = resource?.dispute_amount as Record<string, unknown> | undefined;
+  // dispute_outcome: { outcome_code: string } — UNVERIFIED; present on RESOLVED events
+  const disputeOutcome = resource?.dispute_outcome as Record<string, unknown> | undefined;
+  return {
+    disputeId:         resource?.dispute_id as string | undefined,
+    buyerTxnId:        txns?.[0]?.buyer_transaction_id as string | undefined,
+    // dispute_state: REQUIRED_ACTION | UNDER_PAYPAL_REVIEW | RESOLVED | … — UNVERIFIED in webhook
+    paypalState:       resource?.dispute_state as string | undefined,
+    // reason: ITEM_NOT_RECEIVED | UNAUTHORIZED_TRANSACTION — UNVERIFIED in webhook
+    disputeReason:     resource?.reason as string | undefined,
+    // dispute_channel: INTERNAL | EXTERNAL — UNVERIFIED
+    disputeChannel:    resource?.dispute_channel as string | undefined,
+    // dispute_life_cycle_stage: INQUIRY | CHARGEBACK — UNVERIFIED
+    lifeCycleStage:    resource?.dispute_life_cycle_stage as string | undefined,
+    disputeAmountUsd:  disputeAmount?.value as string | undefined,
+    disputeAmountCur:  disputeAmount?.currency_code as string | undefined,
+    outcomeCode:       disputeOutcome?.outcome_code as string | undefined,
+  };
+}
+
+/** Nanoid-like short ID using crypto (avoids importing nanoid). */
+function shortId(): string {
+  return Math.random().toString(36).slice(2, 12);
+}
+
+/**
+ * Upserts a disputes row for the given paypal_dispute_id.
+ * Finds the payment and milestone from the buyer_transaction_id (capture_id).
+ * Returns the dispute row id, or null if the buyer_transaction_id cannot be mapped.
+ *
+ * UPSERT strategy: paypal_dispute_id UNIQUE — INSERT on CREATED, UPDATE on UPDATED/RESOLVED.
+ */
+async function upsertDisputeRow(params: {
+  paypalDisputeId: string;
+  milestoneId: string;
+  paymentId: string;
+  newStatus: DisputeStatus;
+  paypalState: string | undefined;
+  disputeReason: string | undefined;
+  disputeChannel: string | undefined;
+  lifeCycleStage: string | undefined;
+  disputeAmountUsd: string | undefined;
+  disputeAmountCur: string | undefined;
+  resolutionOutcome: string | undefined;
+}): Promise<string> {
+  const existingRows = await db
+    .select({ id: disputes.id, status: disputes.status })
+    .from(disputes)
+    .where(eq(disputes.paypalDisputeId, params.paypalDisputeId))
+    .limit(1);
+
+  if (existingRows.length === 0) {
+    // INSERT — first time we see this dispute
+    const newId = shortId();
+    await db.insert(disputes).values({
+      id: newId,
+      milestoneId: params.milestoneId,
+      paymentId: params.paymentId,
+      paypalDisputeId: params.paypalDisputeId,
+      status: params.newStatus,
+      paypalStatus: params.paypalState ?? null,
+      disputeReason: params.disputeReason ?? null,
+      disputeChannel: params.disputeChannel ?? null,
+      disputeLifeCycleStage: params.lifeCycleStage ?? null,
+      disputeAmountUsd: params.disputeAmountUsd ?? null,
+      disputeAmountCurrency: params.disputeAmountCur ?? null,
+      resolutionOutcome: params.resolutionOutcome ?? null,
+      updatedAt: new Date(),
+    });
+    return newId;
+  }
+
+  // UPDATE — dispute already exists; apply state transition
+  const existing = existingRows[0];
+  const fromStatus = existing.status as DisputeStatus;
+  assertDisputeTransition(fromStatus, params.newStatus);
+
+  await db
+    .update(disputes)
+    .set({
+      status: params.newStatus,
+      paypalStatus: params.paypalState ?? null,
+      disputeReason: params.disputeReason ?? null,
+      disputeChannel: params.disputeChannel ?? null,
+      disputeLifeCycleStage: params.lifeCycleStage ?? null,
+      disputeAmountUsd: params.disputeAmountUsd ?? null,
+      disputeAmountCurrency: params.disputeAmountCur ?? null,
+      resolutionOutcome: params.resolutionOutcome ?? null,
+      updatedAt: new Date(),
+    })
+    .where(eq(disputes.id, existing.id));
+
+  return existing.id;
+}
+
+// ---------------------------------------------------------------------------
+// Dispute event handlers
+// ---------------------------------------------------------------------------
+
 /**
  * CUSTOMER.DISPUTE.CREATED
  * Doc: https://developer.paypal.com/docs/api/customer-disputes/v1/#definition-dispute
  *
- * Fields:
- *   resource.dispute_id                                  = PayPal dispute ID
- *   resource.disputed_transactions[0].buyer_transaction_id = capture transaction ID
+ * Key fields (UNVERIFIED until sandbox call):
+ *   resource.dispute_id
+ *   resource.disputed_transactions[0].buyer_transaction_id  (= capture_id)
+ *   resource.dispute_amount.value / .currency_code
+ *   resource.reason  (ITEM_NOT_RECEIVED | UNAUTHORIZED_TRANSACTION)
+ *   resource.dispute_state  (REQUIRED_ACTION | OPEN_INQUIRIES | …)
  *
- * Transition: milestone funded/paid → disputed
- * Phase 6 will handle full dispute flows; this handler records the dispute only.
+ * Webhook event to subscribe:
+ *   CUSTOMER.DISPUTE.CREATED  (already registered in sandbox)
  */
 async function handleDisputeCreated(
   resource: Record<string, unknown> | undefined,
@@ -682,13 +823,17 @@ async function handleDisputeCreated(
 ): Promise<void> {
   console.log("[webhook] DISPUTE.CREATED resource keys:", Object.keys(resource ?? {}));
 
-  const disputeId  = resource?.dispute_id as string | undefined;
-  const txns       = resource?.disputed_transactions as Array<Record<string, unknown>> | undefined;
-  const buyerTxnId = txns?.[0]?.buyer_transaction_id as string | undefined;
+  const {
+    disputeId, buyerTxnId, paypalState, disputeReason,
+    disputeChannel, lifeCycleStage, disputeAmountUsd, disputeAmountCur,
+  } = extractDisputeResource(resource);
 
   console.log("[webhook] DISPUTE.CREATED fields:", {
-    disputeId:   disputeId  ?? "(absent)",
-    buyerTxnId:  buyerTxnId ?? "(absent)",
+    disputeId:       disputeId       ?? "(absent)",
+    buyerTxnId:      buyerTxnId      ?? "(absent)",
+    paypalState:     paypalState     ?? "(absent — UNVERIFIED)",
+    disputeReason:   disputeReason   ?? "(absent — UNVERIFIED)",
+    disputeAmountUsd: disputeAmountUsd ?? "(absent — UNVERIFIED)",
   });
 
   if (!buyerTxnId) {
@@ -697,18 +842,19 @@ async function handleDisputeCreated(
   }
 
   // Find payment by capture ID (buyer_transaction_id = capture_id for standard orders)
-  const rows = await db
+  const paymentRows = await db
     .select()
     .from(payments)
     .where(eq(payments.paypalCaptureId, buyerTxnId))
     .limit(1);
-  const paymentRow = rows[0];
+  const paymentRow = paymentRows[0];
 
   if (!paymentRow) {
     console.warn("[webhook] DISPUTE.CREATED: no payment found for buyer_transaction_id:", buyerTxnId);
     return;
   }
 
+  // Transition milestone → disputed
   const milestoneRows = await db
     .select()
     .from(milestones)
@@ -727,18 +873,244 @@ async function handleDisputeCreated(
     }
   }
 
+  // Derive our dispute status from PayPal state
+  const newDisputeStatus = paypalState
+    ? paypalStateToDisputeStatus(paypalState)
+    : "open";
+
+  // Upsert dispute row (creates on CREATED)
+  if (disputeId) {
+    await upsertDisputeRow({
+      paypalDisputeId: disputeId,
+      milestoneId: paymentRow.milestoneId,
+      paymentId: paymentRow.id,
+      newStatus: newDisputeStatus,
+      paypalState,
+      disputeReason,
+      disputeChannel,
+      lifeCycleStage,
+      disputeAmountUsd,
+      disputeAmountCur,
+      resolutionOutcome: undefined,
+    });
+  }
+
   await writeAuditLog({
-    entityType: "milestone",
-    entityId: paymentRow.milestoneId,
+    entityType: "dispute",
+    entityId: disputeId ?? paymentRow.milestoneId,
     event: "DISPUTE_CREATED",
     actor: "paypal_webhook",
     payload: {
-      webhookEventId: eventId,
-      disputeId:  disputeId  ?? null,
-      buyerTxnId: buyerTxnId,
-      paymentId:  paymentRow.id,
+      webhookEventId:  eventId,
+      disputeId:       disputeId       ?? null,
+      buyerTxnId:      buyerTxnId,
+      paymentId:       paymentRow.id,
+      milestoneId:     paymentRow.milestoneId,
+      paypalState:     paypalState     ?? null,
+      disputeReason:   disputeReason   ?? null,
+      disputeAmountUsd: disputeAmountUsd ?? null,
     },
   });
 
-  console.log("[webhook] DISPUTE.CREATED: milestone", paymentRow.milestoneId, "→ disputed");
+  console.log("[webhook] DISPUTE.CREATED: milestone", paymentRow.milestoneId, "→ disputed; dispute status:", newDisputeStatus);
+}
+
+/**
+ * CUSTOMER.DISPUTE.UPDATED
+ * UNVERIFIED — event name not yet confirmed in sandbox.
+ * Subscribe: CUSTOMER.DISPUTE.UPDATED in PayPal Developer Dashboard.
+ *
+ * Updates the dispute status and PayPal state fields.
+ * Looks up the existing dispute row by paypal_dispute_id.
+ */
+async function handleDisputeUpdated(
+  resource: Record<string, unknown> | undefined,
+  eventId: string
+): Promise<void> {
+  console.log("[webhook] DISPUTE.UPDATED resource keys:", Object.keys(resource ?? {}));
+
+  const {
+    disputeId, buyerTxnId, paypalState, disputeReason,
+    disputeChannel, lifeCycleStage, disputeAmountUsd, disputeAmountCur,
+  } = extractDisputeResource(resource);
+
+  console.log("[webhook] DISPUTE.UPDATED fields:", {
+    disputeId:   disputeId   ?? "(absent)",
+    paypalState: paypalState ?? "(absent — UNVERIFIED)",
+  });
+
+  if (!disputeId) {
+    console.warn("[webhook] DISPUTE.UPDATED: no dispute_id in resource; skipping");
+    return;
+  }
+
+  // Look up existing dispute row
+  const existingRows = await db
+    .select({ id: disputes.id, milestoneId: disputes.milestoneId, paymentId: disputes.paymentId })
+    .from(disputes)
+    .where(eq(disputes.paypalDisputeId, disputeId))
+    .limit(1);
+
+  if (existingRows.length === 0) {
+    // UPDATED arrived before CREATED — create the row if we can map it
+    console.warn("[webhook] DISPUTE.UPDATED: no existing dispute row for", disputeId, "— will create if buyer txn available");
+    if (buyerTxnId) {
+      const paymentRows = await db
+        .select()
+        .from(payments)
+        .where(eq(payments.paypalCaptureId, buyerTxnId))
+        .limit(1);
+      if (paymentRows[0]) {
+        await upsertDisputeRow({
+          paypalDisputeId: disputeId,
+          milestoneId: paymentRows[0].milestoneId,
+          paymentId: paymentRows[0].id,
+          newStatus: paypalState ? paypalStateToDisputeStatus(paypalState) : "open",
+          paypalState, disputeReason, disputeChannel, lifeCycleStage,
+          disputeAmountUsd, disputeAmountCur, resolutionOutcome: undefined,
+        });
+      }
+    }
+    await writeAuditLog({
+      entityType: "dispute",
+      entityId: disputeId,
+      event: "DISPUTE_UPDATED_NO_ROW",
+      actor: "paypal_webhook",
+      payload: { webhookEventId: eventId, disputeId, paypalState: paypalState ?? null },
+    });
+    return;
+  }
+
+  const existing = existingRows[0];
+  const newDisputeStatus = paypalState ? paypalStateToDisputeStatus(paypalState) : "open";
+
+  await upsertDisputeRow({
+    paypalDisputeId: disputeId,
+    milestoneId: existing.milestoneId,
+    paymentId: existing.paymentId ?? "",
+    newStatus: newDisputeStatus,
+    paypalState, disputeReason, disputeChannel, lifeCycleStage,
+    disputeAmountUsd, disputeAmountCur, resolutionOutcome: undefined,
+  });
+
+  await writeAuditLog({
+    entityType: "dispute",
+    entityId: disputeId,
+    event: "DISPUTE_UPDATED",
+    actor: "paypal_webhook",
+    payload: {
+      webhookEventId: eventId,
+      disputeId,
+      paypalState:  paypalState  ?? null,
+      lifeCycleStage: lifeCycleStage ?? null,
+    },
+  });
+
+  console.log("[webhook] DISPUTE.UPDATED: dispute", disputeId, "→", newDisputeStatus);
+}
+
+/**
+ * CUSTOMER.DISPUTE.RESOLVED
+ * UNVERIFIED — event name not yet confirmed in sandbox.
+ * Subscribe: CUSTOMER.DISPUTE.RESOLVED in PayPal Developer Dashboard.
+ *
+ * Marks the dispute resolved and the milestone either paid or cancelled
+ * depending on the outcome.
+ *
+ * resource.dispute_outcome.outcome_code — UNVERIFIED field name
+ * Known outcome_code values (UNVERIFIED): RESOLVED_BUYER_FAVOR, RESOLVED_SELLER_FAVOR
+ */
+async function handleDisputeResolved(
+  resource: Record<string, unknown> | undefined,
+  eventId: string
+): Promise<void> {
+  console.log("[webhook] DISPUTE.RESOLVED resource keys:", Object.keys(resource ?? {}));
+
+  const {
+    disputeId, outcomeCode, paypalState,
+    disputeReason, disputeChannel, lifeCycleStage,
+    disputeAmountUsd, disputeAmountCur,
+  } = extractDisputeResource(resource);
+
+  console.log("[webhook] DISPUTE.RESOLVED fields:", {
+    disputeId:   disputeId   ?? "(absent)",
+    outcomeCode: outcomeCode ?? "(absent — UNVERIFIED)",
+    paypalState: paypalState ?? "(absent — UNVERIFIED)",
+  });
+
+  if (!disputeId) {
+    console.warn("[webhook] DISPUTE.RESOLVED: no dispute_id in resource; skipping");
+    return;
+  }
+
+  // Find existing dispute row
+  const existingRows = await db
+    .select({ id: disputes.id, milestoneId: disputes.milestoneId, paymentId: disputes.paymentId })
+    .from(disputes)
+    .where(eq(disputes.paypalDisputeId, disputeId))
+    .limit(1);
+
+  if (existingRows.length === 0) {
+    console.warn("[webhook] DISPUTE.RESOLVED: no existing dispute row for", disputeId, "; writing audit log only");
+    await writeAuditLog({
+      entityType: "dispute",
+      entityId: disputeId,
+      event: "DISPUTE_RESOLVED_NO_ROW",
+      actor: "paypal_webhook",
+      payload: { webhookEventId: eventId, disputeId, outcomeCode: outcomeCode ?? null },
+    });
+    return;
+  }
+
+  const existing = existingRows[0];
+
+  await upsertDisputeRow({
+    paypalDisputeId: disputeId,
+    milestoneId: existing.milestoneId,
+    paymentId: existing.paymentId ?? "",
+    newStatus: "resolved",
+    paypalState: paypalState ?? "RESOLVED",
+    disputeReason, disputeChannel, lifeCycleStage,
+    disputeAmountUsd, disputeAmountCur,
+    resolutionOutcome: outcomeCode,
+  });
+
+  // Transition milestone based on outcome (UNVERIFIED outcome codes)
+  const milestoneRows = await db
+    .select()
+    .from(milestones)
+    .where(eq(milestones.id, existing.milestoneId))
+    .limit(1);
+  const milestone = milestoneRows[0];
+
+  if (milestone) {
+    const fromMilestone = milestone.status as MilestoneStatus;
+    // RESOLVED_SELLER_FAVOR → milestone back to paid; RESOLVED_BUYER_FAVOR → cancelled
+    const toMilestone: MilestoneStatus =
+      outcomeCode === "RESOLVED_SELLER_FAVOR" ? "paid" : "cancelled";
+
+    if (fromMilestone !== toMilestone) {
+      assertMilestoneTransition(fromMilestone, toMilestone);
+      await db
+        .update(milestones)
+        .set({ status: toMilestone, updatedAt: new Date() })
+        .where(eq(milestones.id, milestone.id));
+    }
+  }
+
+  await writeAuditLog({
+    entityType: "dispute",
+    entityId: disputeId,
+    event: "DISPUTE_RESOLVED",
+    actor: "paypal_webhook",
+    payload: {
+      webhookEventId:  eventId,
+      disputeId,
+      outcomeCode:     outcomeCode ?? null,
+      milestoneId:     existing.milestoneId,
+      paypalState:     paypalState ?? null,
+    },
+  });
+
+  console.log("[webhook] DISPUTE.RESOLVED: dispute", disputeId, "resolved; outcome:", outcomeCode ?? "(UNVERIFIED)");
 }
