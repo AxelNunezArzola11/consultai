@@ -15,7 +15,80 @@ npm test           # 169 tests passing (all with DATABASE_URL, else 166)
 npm run build      # next build --webpack
 ```
 
-## Phase 2 — Delivery Agent (current)
+## Phase 3 — BriefAgent + Live Plan Canvas ✅ IMPLEMENTED
+
+The BriefAgent turns a plain-language company brief into a structured milestone plan. Chat on the left; plan builds itself on the right.
+
+### How it works
+
+```
+Company types brief at /project/new
+    → POST /api/agent/brief (streamText, Groq qwen3-32b, stopWhen: stepCountIs(10))
+    → System prompt hardened: user brief wrapped in <user_brief>…</user_brief> delimiters
+    → Tools: askClarification (question to user) + saveStructuredBrief (DB write + audit log)
+    → normalizeBriefPlan():
+        • Unsupported criterion kinds → SUBJECTIVE + needsHumanApproval: true
+        • Budget limits enforced (BRIEF_MIN_MILESTONE_USD / BRIEF_MAX_MILESTONE_USD)
+        • At most 6 milestones
+        • Total budget = sum of milestone budgets (±$0.01)
+        • Input capped at BRIEF_INPUT_MAX_CHARS
+    → Plan saved to projects.structured_plan (JSONB)
+    → Draft saved to brief_drafts on every update (debounced 1s)
+    → MilestoneCanvas: drag to reorder, inline budget edits, totals recalculated instantly
+    → GanttView: timeline bar chart + draggable table (@hello-pangea/dnd)
+    → Fallback: ManualPlanEditor shown if LLM fails or rate-limits
+```
+
+### Design invariants
+
+- **No money tools in BriefAgent** — tool allowlist is `{askClarification, saveStructuredBrief}` only — asserted by test
+- **Injection defense** — user brief wrapped in XML-style delimiters; `</user_brief>` stripped before wrapping
+- **Unsupported criteria downgraded** — anything not in supported kinds → SUBJECTIVE + human review flag
+- **Budget limits code-enforced** — server-side validation independent of LLM output
+- **Total consistency** — sum of milestone budgets must equal totalBudgetUsd ±$0.01
+- **Rate limit** — `BRIEF_SESSION_RATE_LIMIT` (default 10) per session per hour, backed by `brief_rate_limit` table
+- **Draft persistence** — `brief_drafts` table; auto-saved on every plan update
+- **Fallback** — if LLM errors, `ManualPlanEditor` pre-fills from draft or example plan; "Use example brief" button labelled demo-only
+
+### New routes (Phase 3)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/agent/brief` | BriefAgent stream (streamText → toUIMessageStreamResponse) |
+| `POST` | `/api/agent/brief-draft` | Draft upsert (debounced auto-save) |
+| `GET` | `/project/new` | Split-screen new project page |
+
+### New env vars (Phase 3)
+
+| Variable | Default | Description |
+|---|---|---|
+| `BRIEF_MIN_MILESTONE_USD` | `100` | Minimum budget per milestone in USD |
+| `BRIEF_MAX_MILESTONE_USD` | `50000` | Maximum budget per milestone in USD |
+| `BRIEF_MAX_MILESTONES` | `6` | Hard cap on milestones (max 6) |
+| `BRIEF_INPUT_MAX_CHARS` | `4000` | Max raw brief length |
+| `BRIEF_SESSION_RATE_LIMIT` | `10` | LLM calls per session per hour |
+
+### Migration (Phase 3)
+
+```bash
+DATABASE_URL=<neon-url> npx tsx lib/db/migrations/run-0003.ts
+```
+Adds: `projects.structured_plan` (JSONB), `brief_drafts` table, `brief_rate_limit` table.
+
+### Tests added
+
+23 new tests in `lib/brief/schema.test.ts`:
+- Invalid LLM output rejected (Zod parse fails)
+- Unsupported criteria downgraded to SUBJECTIVE + `needsHumanApproval: true`
+- Total consistency enforced (±$0.01 tolerance)
+- Budget min/max limits enforced
+- Milestone count limit (max 6)
+- `briefAgentTools` has exactly 2 tools, no money-related names
+- `wrapUserBrief` strips injection attempts, enforces char limit
+
+---
+
+## Phase 2 — Delivery Agent
 
 The Delivery Agent verifies a submitted GitHub PR against project acceptance criteria and proposes a payout.
 
@@ -168,8 +241,9 @@ Migrations are in `lib/db/migrations/`. The `audit_log` table has DB-level trigg
 
 - **Compiler**: `next build --webpack` — never remove the `--webpack` flag (required for Bryntum/Tailwind v4).
 - **Node version**: `20` required (see `.nvmrc`). Vitest 4 requires Node ≥ 20. Use `nvm use 20`.
-- **Tests**: `npm test` runs Vitest — 169 tests across 7 files. DB integration tests require `DATABASE_URL`.
-- **Migration**: Phase 2 tables applied — run `npx tsx lib/db/migrations/run-0002.ts` on a new Neon branch.
+- **Tests**: `npm test` runs Vitest — 189 tests across 8 files (3 skipped DB integration). DB integration tests require `DATABASE_URL`.
+- **Migration (Phase 2)**: run `npx tsx lib/db/migrations/run-0002.ts`
+- **Migration (Phase 3)**: run `npx tsx lib/db/migrations/run-0003.ts`
 
 ### 6. Post-deploy curl checks (Phase 2)
 
@@ -261,3 +335,122 @@ Before Phase 2:
 - Remove demo seed rows from `milestones` table that have no corresponding `payments` row (milestone-2 "Backend API")
 - The `MilestonePaymentPanel` component is superseded by `MoneyFlowPanel` — can be deleted
 - Check Neon connection pool settings for production load (currently using default pooled URL)
+
+---
+
+## Phase 5 — Vetting Agent + Trust Score + Can/Can't-Do Matrix ✅ IMPLEMENTED
+
+The VettingAgent gathers evidence from public sources, computes a transparent trust score, and builds a can/can't-do matrix per candidate.
+
+### How it works
+
+```
+Company views candidates at /project/[id]/vetting
+    → Candidate consent gate (vetting_consent_at must be set first)
+    → POST /api/agent/vetting (per-candidate)
+        → fetchGitHubRepos (github.com API, read-only)
+        → safeFetch(portfolioUrl) (SSRF-protected, HTTPS-only, size-limited)
+            LinkedIn URLs: display-only, NEVER fetched
+        → extractSignals (LLM: Groq qwen3-32b, UNTRUSTED_CONTENT delimiters)
+            → verifyQuotedExcerpts: fabricated excerpts dropped before any signal is created
+        → computeTrustScore: Σ(weight_i × confidence_i) / Σ(weight_i) — pure code
+        → buildMatrix: requirements × signals → can/partial/unknown/no (unknown = no evidence)
+        → signals persisted to DB (cache-by-hash: skip re-extraction if content unchanged)
+        → candidate.trustScore + canDo + cannotDo updated
+
+VettingCard UI:
+    → Trust score (0–100) with colored ring
+    → "How this is scored" panel (weights shown)
+    → Can/can't-do matrix (full, collapsible)
+    → Evidence signals with source links + quoted excerpts
+    → Human-review notice (always visible)
+    → Side-by-side compare (2 candidates)
+    → Shortlist → feeds Phase 4 pipeline
+    → Re-run vetting button
+```
+
+### Design invariants
+
+- **Trust score computed by CODE, never LLM** — `computeTrustScore()` is a pure deterministic function; LLM only extracts facts
+- **Fabricated excerpts dropped** — `verifyQuotedExcerpts()` checks every LLM-quoted excerpt exists verbatim in fetched content
+- **LinkedIn never fetched** — `LinkedInBlockedError` thrown before any network call; displayed as link only
+- **SSRF protection** — HTTPS-only; localhost, private ranges (10.x, 172.16-31.x, 192.168.x), link-local (169.254.x), metadata address (169.254.169.254), IPv6 loopback/link-local, IPv4-mapped IPv6, redirects all blocked
+- **Protected attributes never scored** — name, photo, gender, age, nationality, location not in Signal interface; asserted by test
+- **"Unknown" never inferred** — `buildMatrix()` uses "unknown" only when zero signals exist for a requirement
+- **Deterministic fallback** — if GROQ_API_KEY absent or LLM error, zero signals produced; matrix shows "unknown"; score = 0
+- **Cache-by-hash** — signals cached by content_hash; re-extraction skipped if content unchanged
+- **Signals link to source** — every signal has sourceUrl; every quoted excerpt is verified
+
+### New routes (Phase 5)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/agent/vetting` | company | Run vetting for a candidate |
+| `PUT` | `/api/agent/vetting` | — | Record candidate consent |
+| `POST` | `/api/candidates/shortlist` | company | Shortlist a candidate → feeds Phase 4 |
+| `GET` | `/api/candidates/search` | — | Postgres full-text search over candidates |
+| `GET` | `/project/[id]/vetting` | company | Vetting dashboard (cards, matrix, compare, search) |
+
+### New env vars (Phase 5)
+
+No new required env vars. `GITHUB_TOKEN`/`GITHUB_PAT` and `GROQ_API_KEY` from Phase 2 are reused.
+
+### Migration (Phase 5)
+
+```bash
+DATABASE_URL=<neon-url> npm run migrate:0005
+# Adds: signals table, vetting_consent_at/vetting_ran_at columns, search_vector tsvector column + trigger
+```
+
+### Seed (Phase 5)
+
+```bash
+npm run seed            # creates company, project, 3 candidates
+npm run seed:vetting    # seeds signals + consent; attempts 1 live GitHub lookup
+```
+
+### Tests added (Phase 5)
+
+| File | Tests | Coverage |
+|---|---|---|
+| `lib/vetting/signals.test.ts` | 24 | Score formula, matrix, determinism, protected attrs |
+| `lib/vetting/ssrf-safe-fetch.test.ts` | 39 | All SSRF cases, LinkedIn blocked, redirects |
+| `lib/vetting/llm-extraction.test.ts` | 21 | Fabricated quotes, fallback, injection defense |
+| `lib/vetting/invariants.test.ts` | 39 | All 7 required invariants combined |
+| **Phase 5 total** | **123** | — |
+| **Cumulative total** | **373** | (3 DB integration skipped without DATABASE_URL) |
+
+### Post-deploy curl checks (Phase 5)
+
+```bash
+BASE=https://consultai-rho.vercel.app
+
+# 1. Vetting endpoint — no role cookie → 403
+curl -s -o/dev/null -w "%{http_code}" -X POST $BASE/api/agent/vetting \
+  -H "Content-Type: application/json" -d '{"candidateId":"x","projectId":"y"}'
+# → 403
+
+# 2. Set company cookie
+curl -s -c /tmp/jar -X POST $BASE/api/auth/set-role \
+  -H "Content-Type: application/json" -d '{"role":"company"}'
+# → {"ok":true,"role":"company"}
+
+# 3. Vetting with company cookie — missing candidate → 404
+curl -s -b /tmp/jar -X POST $BASE/api/agent/vetting \
+  -H "Content-Type: application/json" -d '{"candidateId":"nonexistent","projectId":"project-1"}'
+# → {"error":"Candidate not found"}
+
+# 4. Shortlist — no cookie → 403
+curl -s -o/dev/null -w "%{http_code}" -X POST $BASE/api/candidates/shortlist \
+  -H "Content-Type: application/json" -d '{"candidateId":"candidate-1","projectId":"project-1"}'
+# → 403
+
+# 5. Search — no query → all candidates
+curl -s "$BASE/api/candidates/search?projectId=project-1" | head -c 200
+# → {"results":[...],"query":null}
+
+# 6. Search with query
+curl -s "$BASE/api/candidates/search?projectId=project-1&q=React" | head -c 200
+# → {"results":[...],"query":"React","method":"fts"}
+```
+

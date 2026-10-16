@@ -21,6 +21,12 @@ export default function CompanyLayout({ children }: { children: ReactNode }) {
           >
             Dashboard
           </Link>
+          <Link
+            href="/project/new"
+            className="text-muted-foreground hover:text-foreground transition-colors"
+          >
+            + New project
+          </Link>
         </nav>
         <div className="flex items-center gap-3">
           <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded">

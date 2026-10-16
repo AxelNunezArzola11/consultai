@@ -27,6 +27,11 @@ import {
 } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
+// Re-export primaryKey and uniqueIndex for external use
+// ---------------------------------------------------------------------------
+export { primaryKey, uniqueIndex };
+
+// ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
 
@@ -52,6 +57,7 @@ export const milestoneStatusEnum = pgEnum("milestone_status", [
 ]);
 
 export const candidateStatusEnum = pgEnum("candidate_status", [
+  // Phase 1 / legacy
   "pending",
   "shortlisted",
   "nda_sent",
@@ -60,6 +66,16 @@ export const candidateStatusEnum = pgEnum("candidate_status", [
   "selected",
   "rejected",
   "cascaded",
+  // Phase 4 full pipeline
+  "found",
+  "booking_unlocked",
+  "booked",
+  "meeting_held",
+  "declined",
+  "expired",
+  "cancelled",
+  "no_show",
+  "invalid_booking",
 ]);
 
 export const ndaStatusEnum = pgEnum("nda_status", [
@@ -169,6 +185,14 @@ export const projects = pgTable("projects", {
   rawBrief: text("raw_brief"),
   /** {summary, context, goals} */
   structuredBrief: jsonb("structured_brief"),
+  /** Normalized BriefPlan JSON — set after BriefAgent saveStructuredBrief tool call */
+  structuredPlan: jsonb("structured_plan"),
+  /**
+   * Sanitized project summary shown to candidates BEFORE NDA acceptance.
+   * This is a separate stored field — never the full brief.
+   * Only the full brief fields (rawBrief, structuredBrief) are served after NDA_SIGNED.
+   */
+  sanitizedSummary: text("sanitized_summary"),
   /** [{id, description, verifiable: bool, verified: bool}] */
   acceptanceCriteria: jsonb("acceptance_criteria"),
   status: projectStatusEnum("status").notNull().default("draft"),
@@ -199,6 +223,17 @@ export const milestones = pgTable("milestones", {
   budgetUsd: decimal("budget_usd", { precision: 10, scale: 2 }).notNull(),
   dueDate: date("due_date"),
   status: milestoneStatusEnum("status").notNull().default("planned"),
+
+  /**
+   * Phase 4 — Dependency engine fields.
+   * dependsOnId: FK to milestones(id) — this milestone's due_date is calculated
+   *   as dependsOn.due_date + offsetDays.
+   * offsetDays: number of calendar days after the dependency's due_date.
+   * Both are nullable — a milestone with no dependency has a fixed due_date.
+   * Funded milestones are never recalculated (financial consistency rule).
+   */
+  dependsOnId: text("depends_on_id"),
+  offsetDays: integer("offset_days"),
 
   // PayPal Order / Capture
   paypalOrderId: text("paypal_order_id"),
@@ -265,6 +300,10 @@ export const candidates = pgTable("candidates", {
   rank: integer("rank"),
   status: candidateStatusEnum("status").notNull().default("pending"),
   rejectionReason: text("rejection_reason"),
+  /** Phase 5: candidate gives in-app consent before vetting begins */
+  vettingConsentAt: timestamp("vetting_consent_at", { withTimezone: true }),
+  /** Phase 5: timestamp of last completed vetting run (for cache-by-hash) */
+  vettingRanAt: timestamp("vetting_ran_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -307,8 +346,30 @@ export const ndas = pgTable("ndas", {
   contentHash: text("content_hash"),
   /** URL of stored NDA PDF */
   pdfUrl: text("pdf_url"),
-  /** Invite token for the /invite/[token] page */
+
+  /**
+   * Phase 4 — Invite token fields.
+   *
+   * NEVER store the raw token — only its SHA-256 hash.
+   * The raw token is sent in the invite link; the hash is stored here.
+   * Single-use: inviteTokenUsed is set to true after first consumption.
+   * Rate-limited: inviteTokenRateLimit increments on each attempt.
+   * inviteTokenExpiresAt: independent of NDA expiry — token window (e.g. 72h).
+   *
+   * Legacy inviteToken column (plain text) is kept for backward compat
+   * with existing rows; new rows must use inviteTokenHash.
+   */
+  /** Plain text token — DEPRECATED for new rows; use inviteTokenHash */
   inviteToken: text("invite_token").unique(),
+  /** SHA-256 hex of the 128-bit random invite token — stored instead of raw */
+  inviteTokenHash: text("invite_token_hash").unique(),
+  /** True after the token is consumed (single-use) */
+  inviteTokenUsed: boolean("invite_token_used").notNull().default(false),
+  /** Rate-limit counter — incremented on each attempt (valid or not) */
+  inviteTokenRateLimit: integer("invite_token_rate_limit").notNull().default(0),
+  /** When the invite link itself expires (independent of NDA expiry window) */
+  inviteTokenExpiresAt: timestamp("invite_token_expires_at", { withTimezone: true }),
+
   status: ndaStatusEnum("status").notNull().default("pending"),
   sentAt: timestamp("sent_at", { withTimezone: true }),
   acceptedAt: timestamp("accepted_at", { withTimezone: true }),
@@ -316,6 +377,8 @@ export const ndas = pgTable("ndas", {
   acceptedName: text("accepted_name"),
   /** IP address at acceptance */
   acceptedIp: text("accepted_ip"),
+  /** SHA-256 of the exact NDA document text shown to the candidate */
+  documentHash: text("document_hash"),
   expiresAt: timestamp("expires_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
@@ -657,4 +720,125 @@ export const paymentProposals = pgTable("payment_proposals", {
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// brief_drafts  (Phase 3 — BriefAgent draft persistence)
+// ---------------------------------------------------------------------------
+
+export const briefDrafts = pgTable("brief_drafts", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").references(() => projects.id),
+  agentSessionId: text("agent_session_id").notNull(),
+  /** Partial or complete BriefPlan JSON — saved on every agent step */
+  planJson: jsonb("plan_json"),
+  /** Raw user brief text — used to pre-fill fallback manual editor */
+  briefText: text("brief_text"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// brief_rate_limit  (Phase 3 — per-session LLM call quota)
+// ---------------------------------------------------------------------------
+
+export const briefRateLimit = pgTable("brief_rate_limit", {
+  agentSessionId: text("agent_session_id").primaryKey(),
+  callCount: integer("call_count").notNull().default(1),
+  windowStart: timestamp("window_start", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// cal_webhook_deliveries  (Phase 4 — Cal.com idempotency)
+// ---------------------------------------------------------------------------
+
+export const calWebhookDeliveries = pgTable("cal_webhook_deliveries", {
+  id: text("id").primaryKey(),
+  /**
+   * Dedup key = triggerEvent + '|' + bookingUid + '|' + createdAt (ISO string).
+   * UNIQUE constraint enforces idempotency across serverless invocations.
+   */
+  dedupKey: text("dedup_key").notNull().unique(),
+  triggerEvent: text("trigger_event").notNull(),
+  bookingUid: text("booking_uid").notNull(),
+  receivedAt: timestamp("received_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// qstash_deliveries  (Phase 4 — QStash message idempotency)
+// ---------------------------------------------------------------------------
+
+export const qstashDeliveries = pgTable("qstash_deliveries", {
+  /** Upstash-Message-Id header value — used as PRIMARY KEY for dedup */
+  messageId: text("message_id").primaryKey(),
+  /** Payload type, e.g. NDA_EXPIRY | NO_SHOW_CHECK */
+  payloadType: text("payload_type").notNull(),
+  /** The entity this message acts on (ndaId or meetingId) */
+  entityId: text("entity_id").notNull(),
+  processedAt: timestamp("processed_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// cascade_log  (Phase 4 — audit trail for candidate cascade events)
+// ---------------------------------------------------------------------------
+
+export const cascadeLog = pgTable("cascade_log", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id")
+    .notNull()
+    .references(() => projects.id),
+  fromCandidateId: text("from_candidate_id")
+    .notNull()
+    .references(() => candidates.id),
+  /**
+   * Next candidate invited — NULL if no more candidates are available.
+   * FK to candidates(id).
+   */
+  toCandidateId: text("to_candidate_id"),
+  /** Reason for cascade: EXPIRED | DECLINED | CANCELLED | NO_SHOW */
+  reason: text("reason").notNull(),
+  /** Which round of cascade this is (1-based) */
+  round: integer("round").notNull().default(1),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// signals (Phase 5 — vetting agent evidence model)
+// ---------------------------------------------------------------------------
+
+export const signals = pgTable("signals", {
+  id: text("id").primaryKey(),
+  candidateId: text("candidate_id")
+    .notNull()
+    .references(() => candidates.id),
+  /** Links to acceptance_criteria[].id from the project brief */
+  requirementId: text("requirement_id").notNull(),
+  signalType: evidenceSourceTypeEnum("signal_type").notNull(),
+  sourceUrl: text("source_url").notNull(),
+  retrievedAt: timestamp("retrieved_at", { withTimezone: true }).notNull().defaultNow(),
+  /** SHA-256 hex of fetched content — used for cache-by-hash */
+  contentHash: text("content_hash").notNull(),
+  /** Fact extracted by LLM and code-verified (excerpt must exist in content) */
+  extractedFact: text("extracted_fact").notNull(),
+  /** Verbatim excerpt from source; verified to exist in fetched content before storing */
+  quotedExcerpt: text("quoted_excerpt").notNull(),
+  /**
+   * Confidence score set by code, not LLM.
+   * Based on signal type and verified excerpt quality.
+   * Range: 0.000–1.000
+   */
+  confidence: decimal("confidence", { precision: 4, scale: 3 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

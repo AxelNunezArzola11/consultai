@@ -21,15 +21,20 @@ export const ROUTES = {
   PAYPAL_PAYOUT: "/api/paypal/payout",
   PAYPAL_WEBHOOK: "/api/paypal/webhook",
 
-  // QStash
-  QSTASH_TIMEOUT: "/api/qstash/timeout",
+  // QStash — NOTE: path is /receive not /receiver (Spike 8 root cause fix)
+  QSTASH_RECEIVE: "/api/qstash/receive",
+  /** @deprecated Use QSTASH_RECEIVE */
+  QSTASH_TIMEOUT: "/api/qstash/receive",
 
   // Cal.com
   CAL_WEBHOOK: "/api/cal/webhook",
 
-  // NDA
+  // NDA (Phase 4)
   NDA_GENERATE: "/api/nda/generate",
   NDA_ACCEPT: "/api/nda/accept",
+
+  // Invite (freelancer-facing)
+  INVITE: "/invite",
 
   // GitHub
   GITHUB_VERIFY_PR: "/api/github/verify-pr",
@@ -47,6 +52,10 @@ export const ROUTES = {
   AGENT_VETTING: "/api/agent/vetting",
   AGENT_NDA: "/api/agent/nda",
   AGENT_DELIVERY: "/api/agent/delivery",
+
+  // Demo controls (DEMO_MODE only)
+  DEMO_SIMULATE_NDA_SIGNED: "/api/demo/simulate-nda-signed",
+  DEMO_SIMULATE_CANCELLATION: "/api/demo/simulate-cancellation",
 } as const;
 
 /**
