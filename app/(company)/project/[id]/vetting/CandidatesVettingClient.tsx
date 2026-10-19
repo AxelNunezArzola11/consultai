@@ -190,7 +190,7 @@ export function CandidatesVettingClient({
     setVettingStatus((s) => ({ ...s, [candidateId]: "running" }));
 
     // Give consent first
-    await fetch("/api/agent/vetting", {
+    await fetch("/api/agent/vetting/consent", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ candidateId, projectId }),
