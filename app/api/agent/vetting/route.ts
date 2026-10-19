@@ -115,6 +115,12 @@ export async function POST(request: NextRequest) {
       fabricatedDropped: result.fabricatedDropped,
       usedFallback: result.usedFallback,
       errors: result.errors,
+
+      // Debug payload — requirements sent to LLM + raw LLM output per source
+      debugPayload: {
+        requirementsSent: requirements,
+        debugLog: result.debugLog,
+      },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -131,7 +137,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      {
+        error: message,
+        debugPayload: {
+          requirementsSent: requirements,
+          fatalError: message,
+        },
+      },
+      { status: 500 }
+    );
   }
 }
 

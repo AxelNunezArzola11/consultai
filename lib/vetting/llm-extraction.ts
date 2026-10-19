@@ -205,6 +205,12 @@ export interface ExtractionResult {
   fabricatedDropped: number;
   usedFallback: boolean;
   error?: string;
+  /** Debug: the exact prompt sent to the LLM */
+  debugPrompt?: string;
+  /** Debug: raw parsed LLM output object (before signal building) */
+  debugLlmOutput?: unknown;
+  /** Debug: raw string response from Groq before any JSON parsing */
+  debugRawText?: string;
 }
 
 export async function extractSignals(input: ExtractionInput): Promise<ExtractionResult> {
@@ -230,17 +236,22 @@ export async function extractSignals(input: ExtractionInput): Promise<Extraction
     };
   }
 
+  const prompt = buildExtractionPrompt(requirements, signalType, content);
+
+  let debugRawText: string | undefined;
   try {
     const groq = createGroq({ apiKey: groqApiKey });
     const model = process.env.LLM_GROQ_MODEL ?? "qwen/qwen3-32b";
-
-    const prompt = buildExtractionPrompt(requirements, signalType, content);
 
     const { object } = await generateObject({
       model: groq(model),
       schema: ExtractionSchema,
       prompt,
     });
+
+    // Capture the parsed JSON from Groq as the "raw" text
+    // (the ai SDK does not expose the raw HTTP body from generateObject)
+    debugRawText = JSON.stringify(object, null, 2);
 
     // Verify all quoted excerpts exist in the fetched content
     const beforeVerify = object.matches.length;
@@ -256,7 +267,15 @@ export async function extractSignals(input: ExtractionInput): Promise<Extraction
       buildSignal(match, candidateId, signalType, sourceUrl, contentHash)
     );
 
-    return { signals, contentHash, fabricatedDropped, usedFallback: false };
+    return {
+      signals,
+      contentHash,
+      fabricatedDropped,
+      usedFallback: false,
+      debugPrompt: prompt,
+      debugLlmOutput: object,
+      debugRawText,
+    };
   } catch (err) {
     // LLM failure — deterministic fallback (no LLM = no signals = unknown state)
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -266,6 +285,8 @@ export async function extractSignals(input: ExtractionInput): Promise<Extraction
       fabricatedDropped: 0,
       usedFallback: true,
       error: errorMsg,
+      debugPrompt: prompt,
+      debugRawText,
     };
   }
 }

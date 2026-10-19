@@ -53,6 +53,7 @@ export function CandidatesVettingClient({
     scoreBreakdown: ScoreBreakdown;
     matrix: MatrixEntry[];
     signals: Signal[];
+    debugPayload?: unknown;
   }>>({});
 
   // ── Add Candidate form state ────────────────────────────────────────────────
@@ -217,6 +218,7 @@ export function CandidatesVettingClient({
       matrix: MatrixEntry[];
       usedFallback?: boolean;
       errors?: string[];
+      debugPayload?: unknown;
     };
 
     // Surface LLM/Groq errors even when HTTP 200 (fallback path produces trust=0 silently)
@@ -231,6 +233,7 @@ export function CandidatesVettingClient({
         scoreBreakdown: data.scoreBreakdown,
         matrix: data.matrix,
         signals: data.matrix.flatMap((e: MatrixEntry) => e.signals),
+        debugPayload: data.debugPayload,
       },
     }));
     setVettingStatus((s) => ({ ...s, [candidateId]: "done" }));
@@ -260,6 +263,7 @@ export function CandidatesVettingClient({
       scoreBreakdown,
       matrix,
       signals: sigs,
+      debugPayload: undefined as unknown,
     };
   }
 
@@ -545,6 +549,7 @@ export function CandidatesVettingClient({
                     projectId={projectId}
                     onShortlist={handleShortlist}
                     onRerunVetting={() => runVetting(c.id)}
+                    debugPayload={vettingData.debugPayload}
                   />
                 )}
               </div>

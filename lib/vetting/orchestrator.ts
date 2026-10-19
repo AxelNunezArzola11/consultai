@@ -31,10 +31,29 @@ import { computeTrustScore, buildMatrix, buildScoreBreakdown, type Signal } from
 export interface VettingInput {
   candidateId: string;
   projectId: string;
-  /** Requirements from the project's acceptance_criteria */
+  /** Requirements (general tech skills) sent to the LLM as evaluation criteria */
   requirements: Array<{ id: string; description: string }>;
   /** Whether to use cached signals if content hash unchanged */
   useCache?: boolean;
+}
+
+export interface DebugEntry {
+  sourceUrl: string;
+  signalType: string;
+  /** The exact requirements array sent to the LLM */
+  requirementsSent: Array<{ id: string; description: string }>;
+  /** The exact prompt string sent to the LLM */
+  promptSent?: string;
+  /** The parsed LLM output object (before signal building) */
+  llmOutput?: unknown;
+  /** The raw string response from Groq before any JSON parsing */
+  rawLlmText?: string;
+  /** Error message if the LLM call failed */
+  error?: string;
+  /** Whether the deterministic fallback was used */
+  usedFallback: boolean;
+  signalsProduced: number;
+  fabricatedDropped: number;
 }
 
 export interface VettingOutput {
@@ -46,6 +65,8 @@ export interface VettingOutput {
   errors: string[];
   fabricatedDropped: number;
   usedFallback: boolean;
+  /** Debug payload — requirements sent to LLM, raw LLM output per source */
+  debugLog: DebugEntry[];
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +79,7 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
   let fabricatedDropped = 0;
   let usedFallback = false;
   const allSignals: Signal[] = [];
+  const debugLog: DebugEntry[] = [];
 
   // 1. Load candidate
   const [candidate] = await db
@@ -125,6 +147,19 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
         if (result.usedFallback) usedFallback = true;
         allSignals.push(...result.signals);
 
+        debugLog.push({
+          sourceUrl,
+          signalType: "github_repo",
+          requirementsSent: requirements,
+          promptSent: result.debugPrompt,
+          llmOutput: result.debugLlmOutput,
+          rawLlmText: result.debugRawText,
+          error: result.error,
+          usedFallback: result.usedFallback,
+          signalsProduced: result.signals.length,
+          fabricatedDropped: result.fabricatedDropped,
+        });
+
         if (result.error) {
           errors.push(`GitHub repo ${repo.name}: ${result.error}`);
         }
@@ -153,6 +188,19 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
       fabricatedDropped += result.fabricatedDropped;
       if (result.usedFallback) usedFallback = true;
       allSignals.push(...result.signals);
+
+      debugLog.push({
+        sourceUrl: candidate.portfolioUrl,
+        signalType: "portfolio",
+        requirementsSent: requirements,
+        promptSent: result.debugPrompt,
+        llmOutput: result.debugLlmOutput,
+        rawLlmText: result.debugRawText,
+        error: result.error,
+        usedFallback: result.usedFallback,
+        signalsProduced: result.signals.length,
+        fabricatedDropped: result.fabricatedDropped,
+      });
 
       if (result.error) {
         errors.push(`Portfolio fetch: ${result.error}`);
@@ -260,5 +308,6 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
     errors,
     fabricatedDropped,
     usedFallback,
+    debugLog,
   };
 }

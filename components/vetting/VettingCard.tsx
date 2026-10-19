@@ -51,6 +51,8 @@ export interface VettingCardProps {
   projectId: string;
   onShortlist?: (candidateId: string) => void;
   onRerunVetting?: (candidateId: string) => void;
+  /** Temporary debug payload — requirements sent to LLM + raw LLM output */
+  debugPayload?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +92,7 @@ export function VettingCard({
   projectId,
   onShortlist,
   onRerunVetting,
+  debugPayload,
 }: VettingCardProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
   const [showMatrix, setShowMatrix] = useState(false);
@@ -382,6 +385,21 @@ export function VettingCard({
           <span className="font-semibold">⚠ Human review required: </span>
           {humanReviewNotice}
         </div>
+
+        {/* ── DEBUG PANEL — remove before production ── */}
+        {debugPayload !== undefined && (
+          <div>
+            <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wide mb-1">
+              🐛 Debug: LLM payload
+            </p>
+            <pre
+              style={{ background: "#000", color: "#00ff41", fontSize: "10px", lineHeight: "1.4" }}
+              className="overflow-auto rounded p-2 max-h-72 whitespace-pre-wrap break-all"
+            >
+              {JSON.stringify(debugPayload, null, 2)}
+            </pre>
+          </div>
+        )}
 
         {/* Actions */}
         <div className="flex items-center gap-2 pt-1">
