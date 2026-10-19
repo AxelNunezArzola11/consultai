@@ -200,31 +200,41 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
     );
     if (existing) continue; // cache hit — skip insert
 
-    await db.insert(signalsTable).values({
-      id: sig.id,
-      candidateId: sig.candidateId,
-      requirementId: sig.requirementId,
-      signalType: sig.signalType,
-      sourceUrl: sig.sourceUrl,
-      retrievedAt: new Date(sig.retrievedAt),
-      contentHash: sig.contentHash,
-      extractedFact: sig.extractedFact,
-      quotedExcerpt: sig.quotedExcerpt,
-      confidence: sig.confidence.toFixed(3),
-    }).onConflictDoNothing();
+    try {
+      await db.insert(signalsTable).values({
+        id: sig.id,
+        candidateId: sig.candidateId,
+        requirementId: sig.requirementId,
+        signalType: sig.signalType,
+        sourceUrl: sig.sourceUrl,
+        retrievedAt: new Date(sig.retrievedAt),
+        contentHash: sig.contentHash,
+        extractedFact: sig.extractedFact,
+        quotedExcerpt: sig.quotedExcerpt,
+        confidence: sig.confidence.toFixed(3),
+      }).onConflictDoNothing();
+    } catch (dbErr) {
+      const detail = dbErr instanceof Error ? dbErr.message : String(dbErr);
+      throw new Error(`DB insert failed for signal ${sig.id} (${sig.signalType}): ${detail}`);
+    }
   }
 
   // 8. Update candidate record
-  await db
-    .update(candidates)
-    .set({
-      trustScore: trustScore.toFixed(2),
-      canDo,
-      cannotDo,
-      vettingRanAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(candidates.id, candidateId));
+  try {
+    await db
+      .update(candidates)
+      .set({
+        trustScore: trustScore.toFixed(2),
+        canDo,
+        cannotDo,
+        vettingRanAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(candidates.id, candidateId));
+  } catch (dbErr) {
+    const detail = dbErr instanceof Error ? dbErr.message : String(dbErr);
+    throw new Error(`DB update failed for candidate ${candidateId}: ${detail}`);
+  }
 
   // 9. Audit log
   await writeAuditLog({

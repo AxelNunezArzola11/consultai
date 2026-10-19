@@ -20,6 +20,7 @@
  */
 
 import { useState } from "react";
+import { toast } from "sonner";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { MatrixEntry, Signal, ScoreBreakdown } from "@/lib/vetting/signals";
@@ -142,6 +143,10 @@ export function VettingCard({
       });
       if (res.ok) {
         onRerunVetting?.(candidate.id);
+      } else {
+        const errBody = await res.json().catch(() => ({})) as Record<string, unknown>;
+        const errMsg = String(errBody.error ?? `HTTP ${res.status} ${res.statusText}`);
+        toast.error(`Vetting failed: ${errMsg}`);
       }
     } finally {
       setIsLoading(false);
