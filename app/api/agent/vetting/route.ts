@@ -75,9 +75,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
 
-  // Extract requirements from acceptance criteria
-  const criteria = (project.acceptanceCriteria as Array<{ id: string; description: string }> | null) ?? [];
-  const requirements = criteria.map((c) => ({ id: c.id, description: c.description }));
+  // acceptanceCriteria lives inside structuredPlan.milestones[].acceptanceCriteria,
+  // not in the top-level projects.acceptance_criteria column (which is never written).
+  const structuredPlan = project.structuredPlan as {
+    milestones?: Array<{
+      acceptanceCriteria?: Array<{ id: string; description: string }>;
+    }>;
+  } | null;
+  const requirements: Array<{ id: string; description: string }> =
+    structuredPlan?.milestones?.flatMap(
+      (m) => (m.acceptanceCriteria ?? []).map((c) => ({ id: c.id, description: c.description }))
+    ) ?? [];
 
   try {
     const result = await runVetting({
