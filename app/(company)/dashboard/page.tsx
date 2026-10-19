@@ -92,6 +92,24 @@ async function ProjectCard({
             />
           </div>
         </div>
+        {/* Quick-nav links to the most-used project sub-pages */}
+        <div className="flex flex-wrap gap-2 mt-2">
+          {[
+            { label: "Milestones",  href: `/project/${project.id}/milestones` },
+            { label: "Candidates",  href: `/project/${project.id}/candidates` },
+            { label: "Vetting",     href: `/project/${project.id}/vetting` },
+            { label: "Ledger",      href: `/project/${project.id}/ledger` },
+            { label: "Approvals",   href: `/project/${project.id}/approvals` },
+          ].map(({ label, href }) => (
+            <Link
+              key={href}
+              href={href}
+              className="text-xs text-muted-foreground hover:text-foreground border rounded px-2 py-0.5 transition-colors"
+            >
+              {label}
+            </Link>
+          ))}
+        </div>
         {project.rawBrief && (
           <p className="text-sm text-muted-foreground line-clamp-2 mt-1">
             {project.rawBrief}

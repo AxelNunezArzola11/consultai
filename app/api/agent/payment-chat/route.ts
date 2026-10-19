@@ -16,12 +16,12 @@
  * - Tool allowlist is static; user input cannot extend it
  */
 
-import { streamText, stepCountIs } from "ai";
+import { streamText, stepCountIs, convertToModelMessages } from "ai";
 import { createGroq } from "@ai-sdk/groq";
 import { NextRequest } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { projects } from "@/lib/db/schema";
+import { projects, milestones } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
 import {
   paymentChatTools,
@@ -29,6 +29,10 @@ import {
 } from "@/lib/payments/payment-chat-tools";
 
 export const runtime = "nodejs";
+// maxDuration is a hint to Vercel — actual cap depends on plan:
+//   Hobby: 10s (hard cap, cannot be raised)
+//   Pro:   up to 60s (enforced by vercel.json functions.maxDuration)
+// This value is also set in vercel.json for explicit declaration.
 export const maxDuration = 60;
 
 // ── LLM provider ───────────────────────────────────────────────────────────
@@ -67,6 +71,30 @@ function classifyLLMError(err: unknown): string {
 // ── POST handler ───────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  // ── Diagnostic: confirm env vars are visible in this serverless instance ──
+  console.log("[payment-chat] env check:", {
+    DATABASE_URL: !!process.env.DATABASE_URL,
+    GROQ_API_KEY: !!process.env.GROQ_API_KEY,
+    ROLE_COOKIE_SECRET: !!process.env.ROLE_COOKIE_SECRET,
+    LLM_GROQ_MODEL: process.env.LLM_GROQ_MODEL ?? "(default: qwen/qwen3-32b)",
+  });
+
+  try {
+    return await paymentChatHandler(req);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const cause = err instanceof Error && err.cause
+      ? String((err.cause as Error).message ?? err.cause)
+      : undefined;
+    console.error("[payment-chat] unhandled top-level error:", { message, cause });
+    return Response.json(
+      { error: "Internal server error", detail: message, cause },
+      { status: 500 }
+    );
+  }
+}
+
+async function paymentChatHandler(req: NextRequest) {
   // Auth — company only
   const role = await getRoleFromCookie(req.headers.get("cookie"));
   if (role !== "company") {
@@ -86,18 +114,43 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "projectId required" }, { status: 400 });
   }
 
-  // Validate project exists
-  const [project] = await db
-    .select({ id: projects.id })
-    .from(projects)
-    .where(eq(projects.id, projectId))
-    .limit(1);
+  // Validate project exists + load milestones in parallel.
+  // We fetch milestones here (not only via tool) so the system prompt contains
+  // ground-truth context from turn 1. Without this the AI hallucinates "no milestones"
+  // because it hasn't called listMilestones yet and the system prompt is empty.
+  const [projectRows, milestoneRows] = await Promise.all([
+    db
+      .select({ id: projects.id, title: projects.title })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1),
+    db
+      .select({
+        id: milestones.id,
+        title: milestones.title,
+        status: milestones.status,
+        budgetUsd: milestones.budgetUsd,
+        dueDate: milestones.dueDate,
+        position: milestones.position,
+      })
+      .from(milestones)
+      .where(eq(milestones.projectId, projectId))
+      .orderBy(milestones.position),
+  ]);
 
-  if (!project) {
+  if (projectRows.length === 0) {
     return Response.json({ error: "Project not found" }, { status: 404 });
   }
 
   const safeMessages = Array.isArray(messages) ? messages : [];
+
+  // Convert UI-format messages (parts schema) → ModelMessage[] (content schema)
+  // useChat sends { role, parts: [{type,text},...] }; streamText requires { role, content }
+  const modelMessages = safeMessages.length > 0
+    ? await convertToModelMessages(
+        safeMessages as Parameters<typeof convertToModelMessages>[0]
+      )
+    : [];
 
   // Graceful fallback when GROQ_API_KEY is not set
   let llm;
@@ -108,12 +161,18 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: classifyLLMError(err) }, { status: 503 });
   }
 
+  // Build system prompt with pre-loaded milestone context so the AI knows
+  // what milestones exist from the very first turn without needing a tool call.
+  const systemPrompt = buildPaymentChatSystemPrompt(projectId, milestoneRows);
+
+  console.log("[payment-chat] milestones loaded:", milestoneRows.length, "for project", projectId);
+
   let result;
-  const streamArgs = safeMessages.length > 0
+  const streamArgs = modelMessages.length > 0
     ? {
         model: llm,
-        system: buildPaymentChatSystemPrompt(projectId),
-        messages: safeMessages as Parameters<typeof streamText>[0]["messages"],
+        system: systemPrompt,
+        messages: modelMessages,
         tools: paymentChatTools,
         stopWhen: stepCountIs(8),
         onError: (error: { message?: string; error?: unknown }) => {
@@ -122,7 +181,7 @@ export async function POST(req: NextRequest) {
       }
     : {
         model: llm,
-        system: buildPaymentChatSystemPrompt(projectId),
+        system: systemPrompt,
         prompt: "Hello, what can you help me with for payments?",
         tools: paymentChatTools,
         stopWhen: stepCountIs(8),

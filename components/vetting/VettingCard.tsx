@@ -23,6 +23,8 @@ import { useState } from "react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { MatrixEntry, Signal, ScoreBreakdown } from "@/lib/vetting/signals";
+import { GitHubDiagram } from "@/components/vetting/GitHubDiagram";
+import { buildQuadrantDiagram } from "@/lib/vetting/github-diagram";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -91,10 +93,23 @@ export function VettingCard({
   const [showBreakdown, setShowBreakdown] = useState(false);
   const [showMatrix, setShowMatrix] = useState(false);
   const [showSignals, setShowSignals] = useState(false);
+  const [showDiagram, setShowDiagram] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   const score = trustScore ?? 0;
   const scorePercent = Math.round(score * 100);
+
+  // Build a quadrant diagram point from available data.
+  // stackMatch is approximated from the github_repo signal avg confidence when
+  // present; falls back to 0 when the LLM used the deterministic fallback path.
+  const stackMatch = scoreBreakdown?.bySignalType?.github_repo?.avgConfidence ?? 0;
+  const diagramResult = buildQuadrantDiagram([
+    {
+      label: candidate.githubHandle ?? candidate.name,
+      trustScore: score,
+      stackMatch,
+    },
+  ]);
 
   async function handleShortlist() {
     setIsLoading(true);
@@ -328,6 +343,30 @@ export function VettingCard({
                     </p>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* GitHub portfolio quadrant diagram */}
+        {candidate.githubHandle && (
+          <div>
+            <button
+              onClick={() => setShowDiagram((v) => !v)}
+              className="text-xs text-blue-600 hover:underline"
+            >
+              {showDiagram ? "hide portfolio chart" : "portfolio quadrant chart"}
+            </button>
+            {showDiagram && (
+              <div className="mt-2">
+                {diagramResult.ok ? (
+                  <GitHubDiagram
+                    diagram={diagramResult.mermaid}
+                    fallbackText="Portfolio quadrant chart"
+                  />
+                ) : (
+                  <p className="text-xs text-muted-foreground">{diagramResult.fallbackText}</p>
+                )}
               </div>
             )}
           </div>

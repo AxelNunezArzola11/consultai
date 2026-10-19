@@ -8,6 +8,12 @@ export default defineConfig({
   test: {
     environment: "node",
     globals: true,
+    // Exclude Playwright spec files — they use @playwright/test, not vitest
+    exclude: [
+      "**/node_modules/**",
+      "**/tests/**",        // consultai/tests/ is Playwright only
+      "**/*.spec.ts",       // any .spec.ts file outside tests/ (belt-and-suspenders)
+    ],
   },
   resolve: {
     alias: {

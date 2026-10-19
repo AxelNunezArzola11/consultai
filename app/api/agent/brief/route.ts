@@ -22,14 +22,13 @@
  *   - agentSessionId is validated as alphanumeric-safe (nanoid format).
  */
 
-import { streamText, stepCountIs } from "ai";
+import { streamText, convertToModelMessages } from "ai";
 import { createGroq } from "@ai-sdk/groq";
 import { db } from "@/lib/db";
 import { projects } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { checkBriefRateLimit } from "@/lib/brief/rate-limit";
 import {
-  briefAgentTools,
   buildBriefAgentSystemPrompt,
   wrapUserBrief,
 } from "@/lib/brief/tools";
@@ -37,7 +36,12 @@ import { BRIEF_LIMITS } from "@/lib/brief/schema";
 import { NextRequest } from "next/server";
 
 export const runtime = "nodejs";
-export const maxDuration = 60; // Vercel Hobby: max 300s; 60s is plenty for brief gen
+// maxDuration is a hint to Vercel — actual cap depends on plan:
+//   Hobby: 10s (hard cap, cannot be raised)
+//   Pro:   up to 60s (enforced by vercel.json functions.maxDuration)
+//   Enterprise: up to 300s
+// This value is also set in vercel.json for explicit declaration.
+export const maxDuration = 60;
 
 // ---------------------------------------------------------------------------
 // LLM provider
@@ -84,6 +88,30 @@ function classifyLLMError(err: unknown): string {
 // ---------------------------------------------------------------------------
 
 export async function POST(req: NextRequest) {
+  // ── Diagnostic: confirm env vars are visible in this serverless instance ──
+  console.log("[brief-agent] env check:", {
+    DATABASE_URL: !!process.env.DATABASE_URL,
+    GROQ_API_KEY: !!process.env.GROQ_API_KEY,
+    LLM_PROVIDER: process.env.LLM_PROVIDER ?? "(default: groq)",
+    LLM_GROQ_MODEL: process.env.LLM_GROQ_MODEL ?? "(default: qwen/qwen3-32b)",
+  });
+
+  try {
+    return await briefAgentHandler(req);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const cause = err instanceof Error && err.cause
+      ? String((err.cause as Error).message ?? err.cause)
+      : undefined;
+    console.error("[brief-agent] unhandled top-level error:", { message, cause });
+    return Response.json(
+      { error: "Internal server error", detail: message, cause },
+      { status: 500 }
+    );
+  }
+}
+
+async function briefAgentHandler(req: NextRequest) {
   let body: {
     messages?: unknown[];
     projectId?: string;
@@ -124,19 +152,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Validate project exists
-  const projectRows = await db
-    .select({ id: projects.id })
-    .from(projects)
-    .where(eq(projects.id, projectId))
-    .limit(1);
+  // Validate project exists + rate limit check — run in parallel to save ~200-400ms
+  // of sequential Neon HTTP round-trips before streaming starts.
+  const [projectRows, rateResult] = await Promise.all([
+    db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1),
+    checkBriefRateLimit(agentSessionId),
+  ]);
 
   if (projectRows.length === 0) {
     return Response.json({ error: "Project not found" }, { status: 404 });
   }
 
-  // --- Rate limit ---
-  const rateResult = await checkBriefRateLimit(agentSessionId);
   if (!rateResult.allowed) {
     return Response.json(
       {
@@ -153,26 +183,29 @@ export async function POST(req: NextRequest) {
   }
 
   // --- Build messages array ---
-  // The first user message wraps the raw brief in XML delimiters for injection safety.
-  // Subsequent messages are passed through unchanged.
+  // useChat (AI SDK v6) sends messages in UI format: { role, parts: [{type,text},...] }
+  // streamText requires ModelMessage format: { role, content: string | [...] }
+  // We must:
+  //   1. Inject the rawBrief XML delimiter into the first user message's parts (injection defence)
+  //   2. Convert the whole array to ModelMessage[] via convertToModelMessages
   const safeMessages = Array.isArray(messages) ? messages : [];
 
-  // If rawBrief is provided and this is the first turn, replace the last user
-  // message's text with the delimited version.
-  const processedMessages = safeMessages.map((msg: unknown) => {
-    const m = msg as Record<string, unknown>;
-    if (m.role === "user" && rawBrief) {
-      // Only wrap on the first user message (the brief itself)
-      const parts = Array.isArray(m.parts) ? m.parts : [];
-      const hasDelimited = parts.some(
-        (p: unknown) =>
-          typeof p === "object" &&
-          p !== null &&
-          (p as { type?: string }).type === "text" &&
-          typeof (p as { text?: string }).text === "string" &&
-          (p as { text?: string }).text!.includes("<user_brief>")
-      );
-      if (!hasDelimited && parts.length > 0) {
+  // Step 1: Apply rawBrief wrapping on the UI-format messages (operates on .parts)
+  const uiMessages = rawBrief
+    ? safeMessages.map((msg: unknown) => {
+        const m = msg as Record<string, unknown>;
+        if (m.role !== "user") return m;
+        const parts = Array.isArray(m.parts) ? m.parts : [];
+        // Only wrap if not already delimited
+        const alreadyWrapped = parts.some(
+          (p: unknown) =>
+            typeof p === "object" &&
+            p !== null &&
+            (p as { type?: string }).type === "text" &&
+            typeof (p as { text?: string }).text === "string" &&
+            (p as { text?: string }).text!.includes("<user_brief>")
+        );
+        if (alreadyWrapped || parts.length === 0) return m;
         return {
           ...m,
           parts: parts.map((p: unknown, i: number) => {
@@ -187,10 +220,16 @@ export async function POST(req: NextRequest) {
             return p;
           }),
         };
-      }
-    }
-    return msg;
-  });
+      })
+    : safeMessages;
+
+  // Step 2: Convert UI messages → ModelMessage[] (required by streamText)
+  // convertToModelMessages handles parts→content, tool-invocation→tool-call, etc.
+  const modelMessages = uiMessages.length > 0
+    ? await convertToModelMessages(
+        uiMessages as Parameters<typeof convertToModelMessages>[0]
+      )
+    : [];
 
   // --- Stream ---
   let llm;
@@ -201,15 +240,23 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: classifyLLMError(err) }, { status: 503 });
   }
 
-  // streamText requires either `messages` (non-empty) or `prompt`.
-  // When there are no prior messages, use the brief as prompt.
-  const streamArgs = processedMessages.length > 0
+  // ── Tools removed — text-only streaming ─────────────────────────────────
+  // The LLM no longer has access to saveStructuredBrief or any tool.
+  // It outputs only Markdown text. The "Approve & Save Plan" button in the
+  // UI calls /api/db/save-brief directly — a fast (~200ms) DB-only route
+  // with no LLM overhead. This completely eliminates the tool-execution +
+  // text-generation chaining that was hitting the 10s Hobby timeout.
+
+  // streamText: no tools, no tool-loop, pure text stream.
+  // maxTokens: 1000 — a complete 4–6 milestone JSON plan is ~600–900 tokens.
+  // 400 was causing mid-stream truncation, leaving an unclosed ```json fence
+  // that the frontend parser couldn't match, so raw JSON appeared in the chat.
+  const streamArgs = modelMessages.length > 0
     ? {
         model: llm,
         system: buildBriefAgentSystemPrompt(projectId, agentSessionId),
-        messages: processedMessages as Parameters<typeof streamText>[0]["messages"],
-        tools: briefAgentTools,
-        stopWhen: stepCountIs(10),
+        messages: modelMessages,
+        maxTokens: 1000,
         onError: (error: { message?: string; error?: unknown }) => {
           console.error("[brief-agent] streamText error:", error);
         },
@@ -220,8 +267,7 @@ export async function POST(req: NextRequest) {
         prompt: rawBrief
           ? wrapUserBrief(rawBrief)
           : "Please ask me what I want to build.",
-        tools: briefAgentTools,
-        stopWhen: stepCountIs(10),
+        maxTokens: 1000,
         onError: (error: { message?: string; error?: unknown }) => {
           console.error("[brief-agent] streamText error:", error);
         },

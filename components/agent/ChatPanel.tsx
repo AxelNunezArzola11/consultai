@@ -3,15 +3,13 @@
 /**
  * ChatPanel — BriefAgent chat UI.
  *
- * Uses AI SDK v6 useChat from @ai-sdk/react.
- * In v6:
- *   - useChat takes a `transport` option (DefaultChatTransport) not `api: string` directly
- *   - OR pass `ChatInit` options including `transport`
- *   - sendMessage({ text }) is used (not handleSubmit)
- *   - onFinish receives { message, messages } not just message
- *
- * The route at /api/agent/brief returns a UIMessageStream response.
- * The useChat hook uses DefaultChatTransport to communicate with it.
+ * Architecture (Demo-Saver mode):
+ *   - LLM streams Markdown text only — NO tool calls.
+ *   - When the AI message contains a ```json fence matching BriefPlanSchema,
+ *     an "Approve & Save Plan" button is rendered below that message.
+ *   - Clicking it POSTs to /api/db/save-brief (fast DB-only route, ~200ms).
+ *   - This completely separates LLM streaming from DB writes, eliminating
+ *     the Vercel Hobby 10s timeout that hit when both happened in one request.
  */
 
 import React, { useRef, useEffect, useState, useCallback } from "react";
@@ -44,27 +42,13 @@ interface ChatPanelProps {
 function classifyError(err: unknown): string {
   if (err instanceof Error) {
     const raw = err.message;
-
-    // The DefaultChatTransport throws new Error(await response.text()).
-    // The response body may be our JSON error envelope {"error":"..."}.
-    // Try to extract the human-readable message from it.
     let msg = raw;
     try {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
-      if (typeof parsed.error === "string" && parsed.error) {
-        msg = parsed.error;
-      }
-    } catch {
-      // not JSON — use raw message
-    }
+      if (typeof parsed.error === "string" && parsed.error) msg = parsed.error;
+    } catch { /* not JSON */ }
 
-    // ERR_NETWORK_CHANGED / Failed to fetch / NetworkError
-    if (
-      msg.includes("ERR_NETWORK_CHANGED") ||
-      msg.includes("Failed to fetch") ||
-      msg.includes("NetworkError") ||
-      msg.includes("network")
-    ) {
+    if (msg.includes("ERR_NETWORK_CHANGED") || msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("network")) {
       return "Network connection changed. Please check your connection and try again.";
     }
     if (msg.includes("rate limit") || msg.includes("429") || msg.includes("Rate limit")) {
@@ -82,6 +66,117 @@ function classifyError(err: unknown): string {
     return msg || "LLM request failed";
   }
   return "LLM request failed";
+}
+
+// ---------------------------------------------------------------------------
+// Parse JSON plan from an AI message that contains a ```json fence.
+// Handles two cases:
+//   1. Complete fence: ```json { … } ```  — normal happy path
+//   2. Truncated fence: ```json { … (no closing ```)  — model was cut off or
+//      stream is still in progress; we attempt to parse anyway.
+// Returns null if no valid BriefPlan-shaped JSON is found.
+// ---------------------------------------------------------------------------
+
+function extractPlanFromMessage(text: string): BriefPlan | null {
+  // Try complete fence first (greedy from opening to closing ```)
+  const completeMatch = text.match(/```json\s*([\s\S]*?)```/);
+  // Fall back to everything after ```json if no closing fence
+  const partialMatch = completeMatch ? null : text.match(/```json\s*([\s\S]+)$/);
+  const raw = (completeMatch?.[1] ?? partialMatch?.[1] ?? "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    // Minimal shape check — full validation happens server-side
+    if (
+      typeof parsed.projectTitle === "string" &&
+      typeof parsed.totalBudgetUsd === "number" &&
+      Array.isArray(parsed.milestones) &&
+      parsed.milestones.length > 0
+    ) {
+      return parsed as unknown as BriefPlan;
+    }
+  } catch { /* malformed / incomplete JSON — not parseable yet */ }
+  return null;
+}
+
+// Returns true if the message text contains an opening ```json fence,
+// regardless of whether it is closed — used to suppress raw JSON display.
+function messageHasJsonFence(text: string): boolean {
+  return /```json/i.test(text);
+}
+
+// ---------------------------------------------------------------------------
+// Approve & Save button — calls /api/db/save-brief directly
+// ---------------------------------------------------------------------------
+
+interface ApprovePlanButtonProps {
+  plan: BriefPlan;
+  projectId: string;
+  agentSessionId: string;
+  onSaved: (plan: BriefPlan, milestoneCount: number, downgradedCriteria: string[]) => void;
+  onError: (msg: string) => void;
+}
+
+function ApprovePlanButton({ plan, projectId, agentSessionId, onSaved, onError }: ApprovePlanButtonProps) {
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleApprove = useCallback(async () => {
+    setSaving(true);
+    try {
+      const res = await fetch("/api/db/save-brief", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, agentSessionId, plan }),
+      });
+      const data = await res.json() as {
+        ok: boolean;
+        milestoneCount?: number;
+        downgradedCriteria?: string[];
+        errors?: string[];
+      };
+      if (!res.ok || !data.ok) {
+        onError(data.errors?.join(", ") ?? "Failed to save plan");
+        return;
+      }
+      setSaved(true);
+      onSaved(plan, data.milestoneCount ?? plan.milestones.length, data.downgradedCriteria ?? []);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Network error saving plan");
+    } finally {
+      setSaving(false);
+    }
+  }, [plan, projectId, agentSessionId, onSaved, onError]);
+
+  if (saved) {
+    return (
+      <div className="mt-2 flex items-center gap-2">
+        <Badge className="text-xs bg-emerald-600 hover:bg-emerald-700">
+          ✅ Plan saved — {plan.milestones.length} milestones
+        </Badge>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2">
+      <Button
+        onClick={handleApprove}
+        disabled={saving}
+        size="sm"
+        className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
+      >
+        {saving ? (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+            Saving…
+          </span>
+        ) : (
+          "✅ Approve & Save Plan"
+        )}
+      </Button>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +200,9 @@ export function ChatPanel({
   // Count consecutive errors — after 2, escalate to fallback
   const errorCountRef = useRef(0);
 
+  // Track which message IDs have been saved (to show saved badge persistently)
+  const [savedMessageIds, setSavedMessageIds] = useState<Set<string>>(new Set());
+
   // Build transport once (stable reference)
   const transport = useRef(
     new DefaultChatTransport({
@@ -124,10 +222,8 @@ export function ChatPanel({
       console.error("[ChatPanel] useChat error:", msg, err);
       errorCountRef.current += 1;
       if (errorCountRef.current >= 2) {
-        // Escalate to parent fallback editor after 2 consecutive failures
         onLLMError(msg);
       } else {
-        // Show inline dismissible banner — user can retry
         setInlineError(msg);
       }
     },
@@ -152,7 +248,6 @@ export function ChatPanel({
     if (!text || status === "streaming" || status === "submitted") return;
     setInput("");
     setCharCount(0);
-    // Clear inline error and reset counter on new send
     setInlineError(null);
     errorCountRef.current = 0;
     sendMessage({ text });
@@ -195,9 +290,104 @@ export function ChatPanel({
           </div>
         )}
 
-        {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
-        ))}
+        {messages.map((msg) => {
+          const parts = Array.isArray(msg.parts) ? msg.parts as Array<{ type?: string; text?: string }> : [];
+          const textContent = parts
+            .filter((p) => p.type === "text")
+            .map((p) => p.text ?? "")
+            .join("")
+            .replace(/<user_brief>\n?/g, "")
+            .replace(/\n?<\/user_brief>/g, "");
+
+          const isUser = msg.role === "user";
+          const isAI = msg.role === "assistant";
+
+          // Detect a JSON fence in this message regardless of streaming state.
+          // This is used to hide the raw JSON block even while it is still streaming.
+          const hasFence = isAI && messageHasJsonFence(textContent);
+
+          // Only attempt to parse + show the Approve button once streaming is done.
+          const plan = isAI && status !== "streaming" && status !== "submitted"
+            ? extractPlanFromMessage(textContent)
+            : null;
+
+          // Build the visible text:
+          //   - If a complete parseable plan exists: strip the entire ```json…``` block.
+          //   - If the fence exists but JSON isn't parseable yet (still streaming or truncated):
+          //     strip everything from ```json onward so raw JSON is never visible.
+          //   - Otherwise: show full text.
+          const displayText = (() => {
+            if (plan) {
+              // Complete plan parsed — strip the fence block, keep surrounding text
+              return textContent.replace(/```json[\s\S]*?```/g, "").trim();
+            }
+            if (hasFence) {
+              // Fence opened but not yet closed (streaming) — hide from ```json onward
+              return textContent.replace(/```json[\s\S]*/g, "").trim();
+            }
+            return textContent;
+          })();
+
+          const alreadySaved = savedMessageIds.has(msg.id);
+
+          return (
+            <div key={msg.id} className={`flex gap-2 items-start ${isUser ? "flex-row-reverse" : ""}`}>
+              {/* Avatar */}
+              <div className={`w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-medium ${
+                isUser ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+              }`}>
+                {isUser ? "You" : "AI"}
+              </div>
+
+              <div className={`max-w-[80%] space-y-1 ${isUser ? "items-end" : "items-start"}`}>
+                {displayText && (
+                  <div className={`rounded-xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap ${
+                    isUser
+                      ? "bg-primary text-primary-foreground ml-auto"
+                      : "bg-muted text-foreground"
+                  }`}>
+                    {displayText}
+                  </div>
+                )}
+
+                {/* While the JSON fence is streaming: show a subtle "Generating plan…" indicator */}
+                {hasFence && !plan && (status === "streaming" || status === "submitted") && (
+                  <div className="rounded-xl px-3 py-2 text-xs text-muted-foreground bg-muted/50 flex items-center gap-2">
+                    <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                    Generating plan…
+                  </div>
+                )}
+
+                {/* Approve button — only on AI messages with a parseable plan */}
+                {plan && !alreadySaved && (
+                  <ApprovePlanButton
+                    plan={plan}
+                    projectId={projectId}
+                    agentSessionId={agentSessionId}
+                    onSaved={(savedPlan, milestoneCount, downgradedCriteria) => {
+                      setSavedMessageIds((prev) => new Set(prev).add(msg.id));
+                      onPlanUpdate(savedPlan);
+                      if (downgradedCriteria.length > 0) {
+                        setInlineError(`${downgradedCriteria.length} acceptance criteria were flagged for human review.`);
+                      }
+                      console.log("[ChatPanel] plan saved:", { milestoneCount, downgradedCriteria });
+                    }}
+                    onError={(errMsg) => {
+                      setInlineError(errMsg);
+                    }}
+                  />
+                )}
+
+                {/* Already-saved badge (persists after approval) */}
+                {plan && alreadySaved && (
+                  <Badge className="text-xs bg-emerald-600 hover:bg-emerald-700 mt-1">
+                    ✅ Plan saved — {plan.milestones.length} milestones
+                  </Badge>
+                )}
+              </div>
+            </div>
+          );
+        })}
 
         {isLoading && (
           <div className="flex gap-2 items-start">
@@ -254,114 +444,4 @@ export function ChatPanel({
       </div>
     </div>
   );
-}
-
-// ---------------------------------------------------------------------------
-// MessageBubble
-// ---------------------------------------------------------------------------
-
-interface MessagePart {
-  type?: string;
-  text?: string;
-  toolName?: string;
-  state?: string;
-  result?: {
-    success?: boolean;
-    milestoneCount?: number;
-    downgradedCriteria?: string[];
-  };
-}
-
-function MessageBubble({ message }: { message: { id: string; role: string; parts: MessagePart[] } }) {
-  const isUser = message.role === "user";
-  const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
-
-  // Extract text content
-  const textContent = parts
-    .filter((p) => p.type === "text")
-    .map((p) => p.text ?? "")
-    .join("");
-
-  // Tool invocations
-  const toolParts = parts.filter((p) => p.type === "tool-invocation");
-
-  return (
-    <div className={`flex gap-2 items-start ${isUser ? "flex-row-reverse" : ""}`}>
-      {/* Avatar */}
-      <div
-        className={`w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-medium ${
-          isUser
-            ? "bg-primary text-primary-foreground"
-            : "bg-muted text-muted-foreground"
-        }`}
-      >
-        {isUser ? "You" : "AI"}
-      </div>
-
-      <div className={`max-w-[80%] space-y-1 ${isUser ? "items-end" : "items-start"}`}>
-        {/* Text — strip XML delimiters */}
-        {textContent && (
-          <div
-            className={`rounded-xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap ${
-              isUser
-                ? "bg-primary text-primary-foreground ml-auto"
-                : "bg-muted text-foreground"
-            }`}
-          >
-            {textContent
-              .replace(/<user_brief>\n?/g, "")
-              .replace(/\n?<\/user_brief>/g, "")}
-          </div>
-        )}
-
-        {/* Tool call badges */}
-        {toolParts.map((p, i) => (
-          <ToolInvocationBadge key={i} part={p} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ToolInvocationBadge({ part }: { part: MessagePart }) {
-  if (part.toolName === "askClarification") {
-    return (
-      <Badge variant="outline" className="text-xs">
-        💬 Asking clarification…
-      </Badge>
-    );
-  }
-
-  if (part.toolName === "saveStructuredBrief") {
-    if (part.state === "call") {
-      return (
-        <Badge variant="outline" className="text-xs animate-pulse">
-          💾 Saving plan…
-        </Badge>
-      );
-    }
-    if (part.state === "result" && part.result?.success) {
-      return (
-        <div className="space-y-1">
-          <Badge variant="default" className="text-xs bg-emerald-600 hover:bg-emerald-700">
-            ✅ Plan saved — {part.result.milestoneCount} milestones
-          </Badge>
-          {(part.result.downgradedCriteria?.length ?? 0) > 0 && (
-            <p className="text-xs text-amber-600 dark:text-amber-400">
-              ⚠️ {part.result.downgradedCriteria?.length} criteria need human review
-            </p>
-          )}
-        </div>
-      );
-    }
-    if (part.state === "result" && !part.result?.success) {
-      return (
-        <Badge variant="destructive" className="text-xs">
-          ❌ Plan validation failed
-        </Badge>
-      );
-    }
-  }
-
-  return null;
 }

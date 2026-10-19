@@ -75,7 +75,7 @@ export default async function MilestonesPage({
         </div>
       </div>
 
-      {/* Client-side extensions: compliance bar, meetings, payment chat */}
+      {/* Client-side extensions: compliance bar, meetings, payment chat, gantt */}
       <MilestonesClientExtensions
         projectId={id}
         milestones={milestoneList.map((m) => ({
@@ -83,6 +83,16 @@ export default async function MilestonesPage({
           title: m.title,
           status: m.status,
           budgetUsd: m.budgetUsd,
+        }))}
+        ganttMilestones={milestoneList.map((m) => ({
+          id:          m.id,
+          title:       m.title,
+          startDate:   m.startDate   ?? null,
+          dueDate:     m.dueDate     ?? null,
+          status:      m.status,
+          dependsOnId: m.dependsOnId ?? null,
+          offsetDays:  m.offsetDays  ?? null,
+          version:     m.version,
         }))}
       />
 

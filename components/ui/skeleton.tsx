@@ -1,10 +1,21 @@
 import { cn } from "cn"
 
-function Skeleton({ className, ...props }: React.ComponentProps<"div">) {
+function Skeleton({
+  className,
+  shimmer = true,
+  ...props
+}: React.ComponentProps<"div"> & {
+  /** Use the shimmer gradient animation instead of the default pulse. Default true. */
+  shimmer?: boolean
+}) {
   return (
     <div
       data-slot="skeleton"
-      className={cn("animate-pulse rounded-md bg-muted", className)}
+      className={cn(
+        "rounded-md bg-muted",
+        shimmer ? "skeleton-shimmer" : "animate-pulse",
+        className
+      )}
       {...props}
     />
   )

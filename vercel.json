@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "app/api/agent/brief/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/agent/payment-chat/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/agent/vetting/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}

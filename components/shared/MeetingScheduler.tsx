@@ -53,13 +53,19 @@ const STATUS_CFG = {
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "Invalid date";
+  // Guard against nonsense years caused by mis-typed datetime-local input
+  // (e.g. "20026-10-17" which browsers accept but produce year 20026).
+  const year = d.getFullYear();
+  if (year < 2000 || year > 2100) return "Invalid date";
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day:   "numeric",
     year:  "numeric",
     hour:  "2-digit",
     minute: "2-digit",
-  }).format(new Date(iso));
+  }).format(d);
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
@@ -169,6 +175,17 @@ function ScheduleForm({
       setError("Please select a candidate.");
       return;
     }
+
+    // Validate the date if provided — reject nonsense years before they reach the DB
+    if (scheduledAt) {
+      const d = new Date(scheduledAt);
+      const year = d.getFullYear();
+      if (isNaN(d.getTime()) || year < 2000 || year > 2100) {
+        setError("Please enter a valid date (year must be between 2000 and 2100).");
+        return;
+      }
+    }
+
     setLoading(true);
     setError(null);
 

@@ -246,6 +246,22 @@ export const milestones = pgTable("milestones", {
   dependsOnId: text("depends_on_id"),
   offsetDays: integer("offset_days"),
 
+  /**
+   * Step 3 — Gantt scheduling fields.
+   *
+   * startDate: the task's start date stored as a date-only ISO string "YYYY-MM-DD".
+   *   All UTC conversion is performed in one place (the reorder route) to avoid
+   *   off-by-one errors from timezone drift. Bryntum receives and sends dates as
+   *   ISO strings; this column stores them verbatim.
+   *
+   * version: optimistic concurrency counter. The reorder route reads the current
+   *   version, increments it, and uses a WHERE version = :expected predicate.
+   *   If 0 rows are updated the write is rejected with 409 Conflict.
+   *   Default 0 so existing rows start at a known baseline.
+   */
+  startDate: date("start_date"),
+  version: integer("version").notNull().default(0),
+
   // PayPal Order / Capture
   paypalOrderId: text("paypal_order_id"),
   paypalCaptureId: text("paypal_capture_id"),
