@@ -45,28 +45,31 @@ export function GitHubDiagram({ diagram, fallbackText }: GitHubDiagramProps) {
           theme: isDark ? "dark" : "default",
           // Override theme variables to use our CSS tokens where possible.
           // themeVariables are Mermaid's own internal vars — we map our tokens to them.
+          // oklch values are not supported by Mermaid's internal color parser.
+          // All values below are pre-converted hex/rgba equivalents of the original
+          // CSS tokens (see globals.css). Conversion: OKLCH → sRGB via standard matrix.
           themeVariables: isDark
             ? {
-                quadrant1Fill: "oklch(0.75 0.15 255 / 20%)",
-                quadrant2Fill: "oklch(0.205 0 0)",
-                quadrant3Fill: "oklch(0.205 0 0)",
-                quadrant4Fill: "oklch(0.205 0 0)",
-                quadrantPointFill: "oklch(0.75 0.15 255)",
-                quadrantPointTextFill: "oklch(0.985 0 0)",
-                quadrantXAxisTextFill: "oklch(0.708 0 0)",
-                quadrantYAxisTextFill: "oklch(0.708 0 0)",
-                quadrantTitleFill: "oklch(0.985 0 0)",
+                quadrant1Fill: "rgba(104, 176, 255, 0.20)", // oklch(0.75 0.15 255 / 20%) — accent-brand dark @ 20%
+                quadrant2Fill: "#171717",                   // oklch(0.205 0 0) — dark surface
+                quadrant3Fill: "#171717",                   // oklch(0.205 0 0)
+                quadrant4Fill: "#171717",                   // oklch(0.205 0 0)
+                quadrantPointFill: "#68b0ff",               // oklch(0.75 0.15 255) — accent-brand dark
+                quadrantPointTextFill: "#fafafa",           // oklch(0.985 0 0) — near-white
+                quadrantXAxisTextFill: "#a1a1a1",           // oklch(0.708 0 0) — muted text
+                quadrantYAxisTextFill: "#a1a1a1",           // oklch(0.708 0 0)
+                quadrantTitleFill: "#fafafa",               // oklch(0.985 0 0)
               }
             : {
-                quadrant1Fill: "oklch(0.50 0.18 255 / 15%)",
-                quadrant2Fill: "oklch(0.97 0 0)",
-                quadrant3Fill: "oklch(0.97 0 0)",
-                quadrant4Fill: "oklch(0.97 0 0)",
-                quadrantPointFill: "oklch(0.50 0.18 255)",
-                quadrantPointTextFill: "oklch(0.145 0 0)",
-                quadrantXAxisTextFill: "oklch(0.556 0 0)",
-                quadrantYAxisTextFill: "oklch(0.556 0 0)",
-                quadrantTitleFill: "oklch(0.145 0 0)",
+                quadrant1Fill: "rgba(0, 95, 198, 0.15)",   // oklch(0.50 0.18 255 / 15%) — accent-brand light @ 15%
+                quadrant2Fill: "#f5f5f5",                   // oklch(0.97 0 0) — light surface
+                quadrant3Fill: "#f5f5f5",                   // oklch(0.97 0 0)
+                quadrant4Fill: "#f5f5f5",                   // oklch(0.97 0 0)
+                quadrantPointFill: "#005fc6",               // oklch(0.50 0.18 255) — accent-brand light
+                quadrantPointTextFill: "#0a0a0a",           // oklch(0.145 0 0) — near-black
+                quadrantXAxisTextFill: "#737373",           // oklch(0.556 0 0) — muted text
+                quadrantYAxisTextFill: "#737373",           // oklch(0.556 0 0)
+                quadrantTitleFill: "#0a0a0a",               // oklch(0.145 0 0)
               },
         });
 
