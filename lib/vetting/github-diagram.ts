@@ -226,6 +226,7 @@ export function buildQuadrantDiagram(
   // Structural guard: verify the output has the expected shape before returning.
   // This is a lightweight check — full parse happens in the browser via mermaid.parse().
   if (!diagramStructureGuard(diagram)) {
+    console.error("[buildQuadrantDiagram] structure guard failed. Raw diagram:\n", diagram);
     return {
       ok: false,
       fallbackText: "Diagram structure validation failed — showing text fallback.",
@@ -250,7 +251,11 @@ export function diagramStructureGuard(diagram: string): boolean {
   if (!diagram.includes("y-axis")) return false;
   // Must have at least one point: alphanumeric label followed by [number, number]
   if (!/[a-zA-Z0-9].*:\s*\[\d+\.\d+,\s*\d+\.\d+\]/.test(diagram)) return false;
-  // Injection guard: no angle brackets, no script/event keywords
-  if (/<|>|script|onerror|onload|javascript:/i.test(diagram)) return false;
+  // Injection guard: reject standalone angle brackets (but allow --> which is valid Mermaid axis arrow syntax),
+  // and reject script/event-handler keywords.
+  // Strip all --> occurrences first so the > inside them doesn't trigger the angle-bracket check.
+  const withoutArrows = diagram.replace(/-->/g, "");
+  if (/<|>/.test(withoutArrows)) return false;
+  if (/script|onerror|onload|javascript:/i.test(diagram)) return false;
   return true;
 }
