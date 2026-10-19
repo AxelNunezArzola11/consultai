@@ -30,6 +30,7 @@ import { candidates, projects } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
 import { runVetting } from "@/lib/vetting/orchestrator";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { requirementsFromProject } from "@/lib/vetting/requirements-from-project";
 
 export async function POST(request: NextRequest) {
   // Role check
@@ -75,18 +76,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
 
-  // Skills come from structuredBrief.goals — these are general technical skills
-  // (e.g. "Real-time data streaming", "PayPal transaction integration") that the
-  // LLM can actually find evidence for in a candidate's public GitHub / portfolio.
-  // Do NOT use structuredPlan.milestones[].acceptanceCriteria — those are internal
-  // project delivery checks ("App runs locally and connects to Neon") that will
-  // never appear in a candidate's public profile, causing every candidate to score 0.
-  const structuredBrief = project.structuredBrief as {
-    goals?: string[];
-  } | null;
-  const goals = structuredBrief?.goals ?? [];
-  const requirements: Array<{ id: string; description: string }> =
-    goals.map((goal, i) => ({ id: `skill-${i + 1}`, description: goal }));
+  // Derive requirements from whatever project data is available.
+  // Priority: structuredBrief.goals → structuredPlan milestones → project title.
+  // This guarantees requirements is never empty — an empty array causes the LLM
+  // to produce zero matches and a trust score of 0 for every candidate.
+  const requirements = requirementsFromProject(project);
 
   try {
     const result = await runVetting({
