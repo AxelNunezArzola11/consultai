@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
   }
 
-  // Load project to get acceptance criteria
+  // Load project to get required skills for vetting
   const [project] = await db
     .select()
     .from(projects)
@@ -75,17 +75,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
 
-  // acceptanceCriteria lives inside structuredPlan.milestones[].acceptanceCriteria,
-  // not in the top-level projects.acceptance_criteria column (which is never written).
-  const structuredPlan = project.structuredPlan as {
-    milestones?: Array<{
-      acceptanceCriteria?: Array<{ id: string; description: string }>;
-    }>;
+  // Skills come from structuredBrief.goals — these are general technical skills
+  // (e.g. "Real-time data streaming", "PayPal transaction integration") that the
+  // LLM can actually find evidence for in a candidate's public GitHub / portfolio.
+  // Do NOT use structuredPlan.milestones[].acceptanceCriteria — those are internal
+  // project delivery checks ("App runs locally and connects to Neon") that will
+  // never appear in a candidate's public profile, causing every candidate to score 0.
+  const structuredBrief = project.structuredBrief as {
+    goals?: string[];
   } | null;
+  const goals = structuredBrief?.goals ?? [];
   const requirements: Array<{ id: string; description: string }> =
-    structuredPlan?.milestones?.flatMap(
-      (m) => (m.acceptanceCriteria ?? []).map((c) => ({ id: c.id, description: c.description }))
-    ) ?? [];
+    goals.map((goal, i) => ({ id: `skill-${i + 1}`, description: goal }));
 
   try {
     const result = await runVetting({
