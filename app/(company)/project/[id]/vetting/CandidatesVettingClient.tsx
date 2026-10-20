@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { VettingCard } from "@/components/vetting/VettingCard";
 import { CandidateCompare } from "@/components/vetting/CandidateCompare";
 import { QuadrantChart } from "@/components/vetting/QuadrantChart";
+import { ScenarioSimulation } from "@/components/vetting/ScenarioSimulation";
+import type { SimulationCandidate } from "@/components/vetting/ScenarioSimulation";
 import { buildMatrix, buildScoreBreakdown, type Signal, type MatrixEntry } from "@/lib/vetting/signals";
 import type { ScoreBreakdown } from "@/lib/vetting/signals";
 
@@ -51,6 +53,7 @@ export function CandidatesVettingClient({
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [showScoringPanel, setShowScoringPanel] = useState(false);
+  const [showSimulation, setShowSimulation] = useState(false);
   const [vettingStatus, setVettingStatus] = useState<Record<string, "idle" | "running" | "done" | "error">>({});
   const [candidateData, setCandidateData] = useState<Record<string, {
     trustScore: number;
@@ -256,6 +259,25 @@ export function CandidatesVettingClient({
   const compareLeft  = compareIds[0] ? allCandidates.find((c) => c.id === compareIds[0]) : null;
   const compareRight = compareIds[1] ? allCandidates.find((c) => c.id === compareIds[1]) : null;
 
+  // Simulation data — vetted shortlisted candidates (or all vetted if none shortlisted)
+  const simulationCandidates = useMemo<SimulationCandidate[]>(() => {
+    const vetted = allCandidates.filter(
+      (c) => c.vettingRanAt != null || candidateData[c.id] != null
+    );
+    const shortlisted = vetted.filter((c) => c.status === "shortlisted");
+    const base = shortlisted.length >= 2 ? shortlisted : vetted;
+    return base.slice(0, 5).map((c) => {
+      const vd = getCandidateVettingData(c);
+      return {
+        id: c.id,
+        name: c.githubHandle ?? c.name,
+        trustScore: vd.trustScore,
+        scoreBreakdown: vd.scoreBreakdown,
+      };
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allCandidates, candidateData]);
+
   // Quadrant chart data — only vetted candidates
   const quadrantPoints = useMemo(
     () =>
@@ -277,6 +299,48 @@ export function CandidatesVettingClient({
   );
 
   const vettedCount = allCandidates.filter((c) => c.vettingRanAt != null || candidateData[c.id] != null).length;
+
+  // ── Page-level PDF export (all shortlisted / vetted candidates) ────────────
+  const [isPdfExporting, setIsPdfExporting] = useState(false);
+
+  const handleExportFullPdf = useCallback(async () => {
+    setIsPdfExporting(true);
+    try {
+      const { generateExecutivePdf, downloadPdf } = await import("@/lib/pdf/executive-report");
+      const vetted = allCandidates.filter((c) => c.vettingRanAt != null || candidateData[c.id] != null);
+      const pdfCandidates = vetted.map((c) => {
+        const vd = getCandidateVettingData(c);
+        return {
+          id:           c.id,
+          name:         c.name,
+          email:        c.email,
+          githubHandle: c.githubHandle,
+          trustScore:   vd.trustScore,
+          scoreBreakdown: vd.scoreBreakdown,
+          matrix:       vd.matrix,
+          signals:      vd.signals,
+        };
+      });
+      if (pdfCandidates.length === 0) {
+        toast.error("Run vetting on at least one candidate before exporting.");
+        return;
+      }
+      const bytes = await generateExecutivePdf({
+        projectTitle:      `Project ${projectId}`,
+        projectId,
+        candidates:        pdfCandidates,
+        milestones:        [],
+        humanReviewNotice,
+      });
+      downloadPdf(bytes, `executive-report-project-${projectId}.pdf`);
+      toast.success("Executive PDF downloaded");
+    } catch (err) {
+      toast.error(`PDF export failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setIsPdfExporting(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allCandidates, candidateData, projectId, humanReviewNotice]);
 
   return (
     <div className="px-6 py-6 space-y-5">
@@ -315,6 +379,36 @@ export function CandidatesVettingClient({
             className="inline-flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold px-3 py-2 hover:bg-primary/90 active:scale-[0.97] transition-all shadow-sm shadow-primary/20"
           >
             <span className="text-sm leading-none">+</span> Add Candidate
+          </button>
+
+          {/* Export Executive PDF */}
+          <button
+            type="button"
+            onClick={() => { void handleExportFullPdf(); }}
+            disabled={isPdfExporting || vettedCount === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border text-xs font-medium px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            title={vettedCount === 0 ? "Run vetting first" : "Export executive PDF report"}
+          >
+            {isPdfExporting ? (
+              <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            ) : (
+              "↓"
+            )}{" "}
+            Export PDF
+          </button>
+
+          {/* Scenario Simulation toggle */}
+          <button
+            type="button"
+            onClick={() => setShowSimulation((v) => !v)}
+            className={[
+              "text-xs font-medium px-2.5 py-2 rounded-lg border transition-all",
+              showSimulation
+                ? "bg-primary/10 text-primary border-primary/30"
+                : "text-muted-foreground hover:text-foreground border-transparent hover:border-border hover:bg-muted/40",
+            ].join(" ")}
+          >
+            {showSimulation ? "▲ hide simulation" : "⟁ Simulate"}
           </button>
 
           {/* Scoring formula toggle */}
@@ -427,6 +521,14 @@ export function CandidatesVettingClient({
         </form>
       )}
 
+      {/* ── Scenario Simulation ──────────────────────────────────────────── */}
+      {showSimulation && (
+        <ScenarioSimulation
+          candidates={simulationCandidates}
+          onClose={() => setShowSimulation(false)}
+        />
+      )}
+
       {/* ── Scoring transparency panel ─────────────────────────────────── */}
       {showScoringPanel && (
         <div className="rounded-xl border border-border bg-card/80 p-4 text-xs space-y-2">
@@ -451,7 +553,7 @@ export function CandidatesVettingClient({
       )}
 
       {/* ── Human-review notice — always visible ───────────────────────── */}
-      <div className="rounded-lg border border-amber-800/40 bg-amber-950/20 p-3 text-xs text-amber-300/80">
+      <div className="rounded-lg border border-amber-700/60 bg-amber-950/40 p-3 text-xs text-amber-200">
         <span className="font-semibold text-amber-300">⚠ Human review required: </span>
         {humanReviewNotice}
       </div>
@@ -601,7 +703,7 @@ export function CandidatesVettingClient({
                           Unvetted
                         </span>
                       </div>
-                      <div className="rounded-lg border border-amber-800/40 bg-amber-950/20 p-2.5 text-[11px] text-amber-300/80">
+                      <div className="rounded-lg border border-amber-700/60 bg-amber-950/40 p-2.5 text-[11px] text-amber-200">
                         <p className="font-semibold text-amber-300">Consent required</p>
                         <p>This candidate must give in-app consent before vetting begins.</p>
                       </div>

@@ -20,6 +20,7 @@ interface Tab {
 function tabs(id: string): Tab[] {
   return [
     { label: "Milestones",  href: `/project/${id}/milestones`,  description: "Payments & status",                icon: "◈" },
+    { label: "Timeline",    href: `/project/${id}/timeline`,    description: "Gantt / milestone timeline",        icon: "▤" },
     { label: "Candidates",  href: `/project/${id}/candidates`,  description: "Candidate pipeline",               icon: "◉" },
     { label: "Vetting",     href: `/project/${id}/vetting`,     description: "GitHub portfolio & quadrant chart", icon: "◎" },
     { label: "Ledger",      href: `/project/${id}/ledger`,      description: "Financial ledger (AG Grid)",        icon: "◧" },

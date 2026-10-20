@@ -16,7 +16,7 @@
  * - Human-review notice is always displayed
  */
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import type { MatrixEntry, Signal, ScoreBreakdown } from "@/lib/vetting/signals";
@@ -213,6 +213,7 @@ export function VettingCard({
   const [showSignals, setShowSignals] = useState(false);
   const [showDiagram, setShowDiagram] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isPdfLoading, setIsPdfLoading] = useState(false);
 
   const score = trustScore ?? 0;
 
@@ -240,6 +241,36 @@ export function VettingCard({
       setIsLoading(false);
     }
   }
+
+  const handleExportPdf = useCallback(async () => {
+    setIsPdfLoading(true);
+    try {
+      const { generateExecutivePdf, downloadPdf } = await import("@/lib/pdf/executive-report");
+      const bytes = await generateExecutivePdf({
+        projectTitle: `Project ${projectId}`,
+        projectId,
+        candidates: [{
+          id:            candidate.id,
+          name:          candidate.name,
+          email:         candidate.email,
+          githubHandle:  candidate.githubHandle,
+          trustScore:    score,
+          scoreBreakdown,
+          matrix,
+          signals,
+        }],
+        milestones: [],
+        humanReviewNotice,
+      });
+      const safeName = (candidate.githubHandle ?? candidate.name).replace(/[^a-z0-9]/gi, "_").slice(0, 40);
+      downloadPdf(bytes, `executive-report-${safeName}.pdf`);
+      toast.success("Executive PDF downloaded");
+    } catch (err) {
+      toast.error(`PDF export failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setIsPdfLoading(false);
+    }
+  }, [candidate, projectId, score, scoreBreakdown, matrix, signals, humanReviewNotice]);
 
   async function handleRerun() {
     setIsLoading(true);
@@ -514,7 +545,7 @@ export function VettingCard({
         )}
 
         {/* Actions */}
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex items-center gap-2 pt-1 flex-wrap">
           <button
             onClick={handleShortlist}
             disabled={isLoading || isShortlisted}
@@ -540,6 +571,21 @@ export function VettingCard({
               </span>
             ) : (
               "Re-run"
+            )}
+          </button>
+          <button
+            onClick={handleExportPdf}
+            disabled={isPdfLoading}
+            className="text-xs rounded-lg border border-border px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Export Executive PDF report"
+          >
+            {isPdfLoading ? (
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                Exporting…
+              </span>
+            ) : (
+              "↓ PDF"
             )}
           </button>
         </div>

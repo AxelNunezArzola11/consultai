@@ -83,7 +83,7 @@ export default async function ApprovalsPage({
             Payment approval queue for {project.title}
           </p>
         </div>
-        <span className="inline-flex items-center rounded-full border border-amber-400 bg-amber-50 dark:bg-amber-950/30 px-3 py-1 text-xs font-medium text-amber-700 dark:text-amber-400">
+        <span className="inline-flex items-center rounded-full border border-amber-700/60 bg-amber-950/40 px-3 py-1 text-xs font-medium text-amber-300">
           Sandbox mode
         </span>
       </div>
@@ -126,7 +126,7 @@ export default async function ApprovalsPage({
               <CardContent className="space-y-4">
                 {/* Ledger — always shown when any capture data exists */}
                 {(grossUsd || netUsd) && (
-                  <div className="rounded-lg border bg-muted/40 px-4 py-3 text-xs space-y-1">
+                  <div className="rounded-lg border border-slate-700 bg-slate-800/60 px-4 py-3 text-xs space-y-1">
                     <p className="font-medium text-muted-foreground mb-1">Ledger</p>
                     {grossUsd && (
                       <div className="flex justify-between">

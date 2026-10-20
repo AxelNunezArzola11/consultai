@@ -27,26 +27,26 @@ import { lazyExpireNdas, lazyCheckNoShows } from "@/lib/scheduling/lazy-checks";
 // ---------------------------------------------------------------------------
 
 const PIPELINE_COLUMNS = [
-  { key: "found",            label: "Found",            color: "bg-slate-100 dark:bg-slate-800" },
-  { key: "shortlisted",      label: "Shortlisted",      color: "bg-blue-50 dark:bg-blue-950" },
-  { key: "pending",          label: "Pending",          color: "bg-slate-50 dark:bg-slate-900" },
-  { key: "nda_sent",         label: "NDA Sent",         color: "bg-yellow-50 dark:bg-yellow-950" },
-  { key: "nda_signed",       label: "NDA Signed",       color: "bg-lime-50 dark:bg-lime-950" },
-  { key: "booking_unlocked", label: "Booking Unlocked", color: "bg-teal-50 dark:bg-teal-950" },
-  { key: "booked",           label: "Booked",           color: "bg-cyan-50 dark:bg-cyan-950" },
-  { key: "scheduled",        label: "Scheduled",        color: "bg-cyan-50 dark:bg-cyan-950" },
-  { key: "meeting_held",     label: "Meeting Held",     color: "bg-green-50 dark:bg-green-950" },
-  { key: "selected",         label: "Selected",         color: "bg-emerald-50 dark:bg-emerald-950" },
+  { key: "found",            label: "Found",            color: "bg-slate-800" },
+  { key: "shortlisted",      label: "Shortlisted",      color: "bg-blue-950" },
+  { key: "pending",          label: "Pending",          color: "bg-slate-900" },
+  { key: "nda_sent",         label: "NDA Sent",         color: "bg-amber-950/60" },
+  { key: "nda_signed",       label: "NDA Signed",       color: "bg-lime-950" },
+  { key: "booking_unlocked", label: "Booking Unlocked", color: "bg-teal-950" },
+  { key: "booked",           label: "Booked",           color: "bg-cyan-950" },
+  { key: "scheduled",        label: "Scheduled",        color: "bg-cyan-950" },
+  { key: "meeting_held",     label: "Meeting Held",     color: "bg-green-950" },
+  { key: "selected",         label: "Selected",         color: "bg-emerald-950" },
 ] as const;
 
 const TERMINAL_COLUMNS = [
-  { key: "declined",        label: "Declined",        color: "bg-red-50 dark:bg-red-950" },
-  { key: "expired",         label: "Expired",         color: "bg-orange-50 dark:bg-orange-950" },
-  { key: "cancelled",       label: "Cancelled",       color: "bg-red-50 dark:bg-red-950" },
-  { key: "no_show",         label: "No Show",         color: "bg-orange-50 dark:bg-orange-950" },
-  { key: "invalid_booking", label: "Invalid Booking", color: "bg-red-50 dark:bg-red-950" },
-  { key: "rejected",        label: "Rejected",        color: "bg-slate-50 dark:bg-slate-900" },
-  { key: "cascaded",        label: "Cascaded",        color: "bg-slate-50 dark:bg-slate-900" },
+  { key: "declined",        label: "Declined",        color: "bg-rose-950" },
+  { key: "expired",         label: "Expired",         color: "bg-orange-950" },
+  { key: "cancelled",       label: "Cancelled",       color: "bg-rose-950" },
+  { key: "no_show",         label: "No Show",         color: "bg-orange-950" },
+  { key: "invalid_booking", label: "Invalid Booking", color: "bg-rose-950" },
+  { key: "rejected",        label: "Rejected",        color: "bg-slate-900" },
+  { key: "cascaded",        label: "Cascaded",        color: "bg-slate-900" },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -348,7 +348,7 @@ function DemoControlsSection({
   );
 
   return (
-    <div className="rounded-lg border border-orange-300 bg-orange-50 dark:bg-orange-950 p-4 space-y-3">
+    <div className="rounded-lg border border-orange-800/60 bg-orange-950/40 p-4 space-y-3">
       <div className="flex items-center gap-2">
         <Badge variant="destructive" className="text-xs">DEMO ONLY</Badge>
         <h2 className="text-sm font-semibold">Demo Controls</h2>

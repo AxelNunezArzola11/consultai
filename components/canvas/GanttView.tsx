@@ -110,16 +110,18 @@ export default function GanttView({ plan, onReorder, onBudgetChange }: GanttView
             <div className="w-5 text-xs text-muted-foreground flex-shrink-0">
               M{i + 1}
             </div>
-            <div className="flex-1 h-7 bg-muted/30 rounded overflow-hidden relative">
+            <div className="flex-1 h-7 bg-slate-800/60 rounded overflow-hidden relative">
               <div
-                className={`absolute h-full rounded ${statusColor(i)} opacity-80 flex items-center px-2 text-white text-xs font-medium truncate transition-all duration-300`}
+                className={`absolute h-full rounded ${statusColor(i)} opacity-90 flex items-center px-2 transition-all duration-300`}
                 style={{
-                  left: `${bar.startPct}%`,
-                  width: `${bar.widthPct}%`,
-                  minWidth: "2rem",
+                  left:     `${bar.startPct}%`,
+                  width:    `${bar.widthPct}%`,
+                  minWidth: "2.5rem",
                 }}
               >
-                {bar.title}
+                <span className="text-white text-[11px] font-semibold whitespace-nowrap overflow-hidden text-ellipsis">
+                  {bar.title}
+                </span>
               </div>
             </div>
             <div className="text-xs text-muted-foreground w-16 text-right flex-shrink-0">
@@ -130,8 +132,8 @@ export default function GanttView({ plan, onReorder, onBudgetChange }: GanttView
       </div>
 
       {/* Draggable milestone rows */}
-      <div className="border rounded-lg overflow-hidden">
-        <div className="grid grid-cols-[auto_1fr_auto_auto] gap-0 text-xs font-medium text-muted-foreground bg-muted/30 px-3 py-2 border-b">
+      <div className="border border-slate-700 rounded-lg overflow-hidden">
+        <div className="grid grid-cols-[auto_1fr_auto_auto] gap-0 text-xs font-medium text-muted-foreground bg-slate-800/40 px-3 py-2 border-b border-slate-700">
           <div className="w-6" />
           <div>Milestone</div>
           <div className="w-24 text-right mr-2">Budget</div>

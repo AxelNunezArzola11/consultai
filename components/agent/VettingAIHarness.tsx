@@ -5,10 +5,11 @@
  *
  * Architecture (PayPal AG Grid boilerplate pattern):
  *   Chat UI → Harness (Conversation Manager) → Agents → Tools
- *     · filter_candidates  — mutates filter state via onFilterCandidates callback
- *     · assign_candidate   — notifies parent via onAssignCandidate callback
- *     · reschedule_milestone — notifies parent via onRescheduleMilestone callback
- *     · query_vetting_summary — returns textual summary inline
+ *     · filter_candidates      — mutates filter state via onFilterCandidates callback
+ *     · assign_candidate       — notifies parent via onAssignCandidate callback
+ *     · reschedule_milestone   — notifies parent via onRescheduleMilestone callback
+ *     · query_vetting_summary  — returns textual summary inline
+ *     · smart_reschedule_gantt — full-timeline re-levelling via onSmartReschedule callback
  *
  * Usage: drop into the vetting page or milestones page as a floating chat panel.
  * The panel is collapsible so it doesn't obstruct the main grid/Gantt views.
@@ -36,14 +37,31 @@ interface RescheduleEvent {
   newStartDate: string;
 }
 
+export interface GanttMilestoneUpdate {
+  id: string;
+  title: string;
+  startDate: string | null;
+  dueDate: string | null;
+}
+
+export interface SmartRescheduleResult {
+  intent: string;
+  updates: GanttMilestoneUpdate[];
+  message: string;
+}
+
 export interface VettingAIHarnessProps {
   projectId: string;
+  /** Current milestones — passed to smart_reschedule_gantt tool */
+  milestones?: GanttMilestoneUpdate[];
   /** Called when AI tool filter_candidates fires — mutate your AG Grid filter */
   onFilterCandidates?: (criteria: FilterCriteria) => void;
   /** Called when AI tool assign_candidate fires */
   onAssignCandidate?: (event: AssignEvent) => void;
   /** Called when AI tool reschedule_milestone fires */
   onRescheduleMilestone?: (event: RescheduleEvent) => void;
+  /** Called when smart_reschedule_gantt fires with a full updated milestone list */
+  onSmartReschedule?: (result: SmartRescheduleResult) => void;
 }
 
 // ── Tool result renderer ──────────────────────────────────────────────────────
@@ -56,23 +74,58 @@ interface ToolResult {
   milestoneName?: string;
   newStartDate?: string;
   focus?: string;
+  intent?: string;
+  updates?: GanttMilestoneUpdate[];
 }
 
-function ToolResultBadge({ result }: { result: ToolResult }) {
+function ToolResultBadge({ result, onApplyReschedule }: { result: ToolResult; onApplyReschedule?: (r: SmartRescheduleResult) => void }) {
   const icons: Record<string, string> = {
-    filter_candidates:    "⊞",
-    assign_candidate:     "→",
-    reschedule_milestone: "◷",
+    filter_candidates:     "⊞",
+    assign_candidate:      "→",
+    reschedule_milestone:  "◷",
     query_vetting_summary: "◎",
+    smart_reschedule_gantt: "⟳",
   };
+
+  const isSmartReschedule = result.action === "smart_reschedule_gantt" && Array.isArray(result.updates);
+
   return (
     <div className="flex items-start gap-2 rounded-lg border border-primary/20 bg-primary/8 p-2.5 text-xs mt-1">
       <span className="text-primary shrink-0 mt-0.5">{icons[result.action] ?? "◈"}</span>
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <p className="font-semibold text-primary text-[11px] uppercase tracking-wide mb-0.5">
           {result.action.replace(/_/g, " ")}
         </p>
         <p className="text-foreground/80">{result.message}</p>
+        {isSmartReschedule && result.updates && result.intent && (
+          <div className="mt-2 space-y-1">
+            <p className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
+              {result.updates.length} milestone(s) recalculated:
+            </p>
+            <div className="space-y-0.5 max-h-28 overflow-y-auto">
+              {result.updates.slice(0, 6).map((u) => (
+                <div key={u.id} className="flex items-center justify-between gap-2 bg-muted/30 rounded px-2 py-1">
+                  <span className="text-foreground/80 truncate text-[10px]">{u.title}</span>
+                  <span className="text-muted-foreground text-[10px] tabular-nums shrink-0">
+                    {u.dueDate ?? "—"}
+                  </span>
+                </div>
+              ))}
+              {result.updates.length > 6 && (
+                <p className="text-[10px] text-muted-foreground text-center">…and {result.updates.length - 6} more</p>
+              )}
+            </div>
+            {onApplyReschedule && (
+              <button
+                type="button"
+                onClick={() => onApplyReschedule({ intent: result.intent!, updates: result.updates!, message: result.message })}
+                className="mt-1.5 w-full text-[11px] font-semibold text-primary bg-primary/10 hover:bg-primary/20 border border-primary/20 rounded px-3 py-1.5 transition-colors"
+              >
+                ⟳ Apply to Timeline
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -82,10 +135,18 @@ function ToolResultBadge({ result }: { result: ToolResult }) {
 
 export function VettingAIHarness({
   projectId,
+  milestones = [],
+  onFilterCandidates,
+  onAssignCandidate,
+  onRescheduleMilestone,
+  onSmartReschedule,
 }: VettingAIHarnessProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Keep a stable ref to the latest milestones so the transport body stays current
+  const milestonesRef = useRef(milestones);
+  useEffect(() => { milestonesRef.current = milestones; }, [milestones]);
   // Stable transport reference — instantiated once (same pattern as ChatPanel.tsx)
   // eslint-disable-next-line react-hooks/refs
   const transport = useRef(new DefaultChatTransport({ api: "/api/agent/harness", body: { projectId } })).current;
@@ -118,12 +179,35 @@ export function VettingAIHarness({
     }
   };
 
+  // Fire side-effect callbacks for tool calls contained in messages
+  useEffect(() => {
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg || lastMsg.role !== "assistant") return;
+    const parts = Array.isArray(lastMsg.parts)
+      ? (lastMsg.parts as Array<{ type?: string; toolName?: string; result?: unknown }>)
+      : [];
+    for (const part of parts) {
+      if (part.type !== "tool-result") continue;
+      const r = part.result as ToolResult | null;
+      if (!r) continue;
+      if (r.action === "filter_candidates" && r.criteria) onFilterCandidates?.(r.criteria);
+      if (r.action === "assign_candidate" && r.candidateName && r.milestoneName) {
+        onAssignCandidate?.({ candidateName: r.candidateName, milestoneName: r.milestoneName });
+      }
+      if (r.action === "reschedule_milestone" && r.milestoneName && r.newStartDate) {
+        onRescheduleMilestone?.({ milestoneName: r.milestoneName, newStartDate: r.newStartDate });
+      }
+    }
+  // Only run when messages change (not on every render)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages]);
+
   // Suggestions for the empty state
   const suggestions = [
     "Show candidates with trust score > 70",
-    "Who are the shortlisted candidates?",
     "Filter by React skill",
-    "Assign top candidate to milestone 1",
+    "Re-level timeline for a 20 hr/week candidate",
+    "Shift all delivery phases by 2 weeks",
   ];
 
   return (
@@ -208,7 +292,11 @@ export function VettingAIHarness({
                       </div>
                     )}
                     {toolResults.map((tr, i) => (
-                      <ToolResultBadge key={i} result={tr} />
+                      <ToolResultBadge
+                        key={i}
+                        result={tr}
+                        onApplyReschedule={tr.action === "smart_reschedule_gantt" ? onSmartReschedule : undefined}
+                      />
                     ))}
                   </div>
                 </div>
@@ -270,7 +358,7 @@ export function VettingAIHarness({
             ? "bg-muted/80 border border-border text-foreground hover:bg-muted"
             : "bg-primary text-primary-foreground hover:bg-primary/90 shadow-primary/25",
         ].join(" ")}
-        title="AI Vetting Assistant"
+        title="AI Vetting &amp; Gantt Assistant"
       >
         <span className="text-base">◎</span>
         <span className="hidden sm:inline">{isOpen ? "Close AI" : "AI Assistant"}</span>

@@ -7,10 +7,11 @@
  *   Chat UI → Harness (Conversation Manager) → Agents → Tools (AG Grid & Bryntum APIs)
  *
  * Tools:
- *   - filter_candidates  — filter AG Grid candidate table by criteria
- *   - assign_candidate   — assign candidate to Gantt milestone
- *   - reschedule_milestone — reschedule Gantt milestone to new start date
- *   - query_vetting_summary — natural-language summary of vetting scores
+ *   - filter_candidates       — filter AG Grid candidate table by criteria
+ *   - assign_candidate        — assign candidate to Gantt milestone
+ *   - reschedule_milestone    — reschedule Gantt milestone to new start date
+ *   - query_vetting_summary   — natural-language summary of vetting scores
+ *   - smart_reschedule_gantt  — intelligent re-levelling of the entire timeline
  *
  * Security:
  *   - Only projectId + text messages accepted from the client.
@@ -29,11 +30,14 @@ const groq = createGroq({ apiKey: process.env.GROQ_API_KEY ?? "" });
 
 const SYSTEM_PROMPT = `You are ConsultAI's in-product AI assistant, integrated with AG Grid (candidate matrix) and Bryntum Gantt (project timeline).
 
-You have access to four tools:
-1. filter_candidates — narrow down candidates by trust score, skill, or status.
-2. assign_candidate — assign a candidate to a milestone.
-3. reschedule_milestone — move a milestone to a new date.
-4. query_vetting_summary — summarise vetting results.
+You have access to five tools:
+1. filter_candidates       — narrow down candidates by trust score, skill, or status.
+2. assign_candidate        — assign a candidate to a milestone.
+3. reschedule_milestone    — move a single milestone to a new date.
+4. query_vetting_summary   — summarise vetting results.
+5. smart_reschedule_gantt  — intelligently re-level the entire timeline based on capacity or shift delivery phases.
+
+When the user asks to re-level, re-schedule based on availability (e.g. "20 hr/week candidate"), or shift delivery phases by N weeks, always use smart_reschedule_gantt.
 
 Always respond in plain English. Keep replies concise. Acknowledge when you lack information.`;
 
@@ -128,6 +132,123 @@ export async function POST(req: NextRequest) {
             focus,
             message: `Generating ${focus} summary for project ${projectId}`,
           }),
+        }),
+
+        smart_reschedule_gantt: tool({
+          description: [
+            "Intelligently re-level the entire project Gantt timeline.",
+            "Use when the user wants to:",
+            "  - Re-level for a part-time candidate (e.g. '20 hr/week')",
+            "  - Shift all delivery phases by N weeks",
+            "  - Compress / expand milestone durations based on new capacity",
+            "Returns a list of milestone updates the client should apply to Bryntum Gantt.",
+          ].join(" "),
+          inputSchema: zodSchema(z.object({
+            intent: z.enum([
+              "relevel_capacity",   // adjust durations for a new weekly-hours constraint
+              "shift_phases",       // move all milestones forward/backward by N weeks
+              "compress_timeline",  // shrink all durations by a factor
+              "expand_timeline",    // grow all durations by a factor
+            ]).describe("The type of reschedule operation"),
+
+            weeklyHours: z.number().min(1).max(60).optional()
+              .describe("Candidate weekly availability in hours (for relevel_capacity)"),
+
+            shiftWeeks: z.number().optional()
+              .describe("Positive = push forward, negative = pull back (for shift_phases)"),
+
+            scaleFactor: z.number().min(0.1).max(5).optional()
+              .describe("Duration multiplier for compress/expand (e.g. 0.75 = 25% shorter)"),
+
+            milestones: z.array(z.object({
+              id:        z.string(),
+              title:     z.string(),
+              startDate: z.string().nullable(),
+              dueDate:   z.string().nullable(),
+            })).describe("Current milestone list from the Gantt (id, title, startDate, dueDate)"),
+          })),
+
+          execute: async ({ intent, weeklyHours, shiftWeeks, scaleFactor, milestones: mlList }) => {
+            // Helper: parse a YYYY-MM-DD string to a JS Date at midnight UTC
+            const parseDate = (s: string | null): Date | null => {
+              if (!s) return null;
+              const d = new Date(s + "T00:00:00Z");
+              return isNaN(d.getTime()) ? null : d;
+            };
+
+            // Helper: format a Date back to YYYY-MM-DD
+            const fmtDate = (d: Date): string => d.toISOString().slice(0, 10);
+
+            // Helper: add days to a Date (returns new Date)
+            const addDays = (d: Date, days: number): Date =>
+              new Date(d.getTime() + days * 86_400_000);
+
+            // -----------------------------------------------------------------
+            // Build updated milestone list based on intent
+            // -----------------------------------------------------------------
+            const updated = mlList.map((m) => {
+              const start = parseDate(m.startDate);
+              const due   = parseDate(m.dueDate);
+
+              if (intent === "shift_phases") {
+                const weeks = shiftWeeks ?? 1;
+                const days = Math.round(weeks * 7);
+                return {
+                  id:        m.id,
+                  title:     m.title,
+                  startDate: start ? fmtDate(addDays(start, days)) : m.startDate,
+                  dueDate:   due   ? fmtDate(addDays(due,   days)) : m.dueDate,
+                };
+              }
+
+              if (intent === "compress_timeline" || intent === "expand_timeline") {
+                const factor = scaleFactor ?? (intent === "compress_timeline" ? 0.75 : 1.33);
+                if (!start || !due) return m;
+                const durationMs = due.getTime() - start.getTime();
+                const newDurationMs = Math.max(1, Math.round(durationMs * factor));
+                const newDue = new Date(start.getTime() + newDurationMs);
+                return {
+                  id:        m.id,
+                  title:     m.title,
+                  startDate: m.startDate,
+                  dueDate:   fmtDate(newDue),
+                };
+              }
+
+              if (intent === "relevel_capacity") {
+                // Standard full-time = 40 hr/week. Scale durations proportionally.
+                const hrs = weeklyHours ?? 20;
+                const factor = 40 / Math.max(1, hrs);
+                if (!start || !due) return m;
+                const durationMs = due.getTime() - start.getTime();
+                const newDurationMs = Math.max(86_400_000, Math.round(durationMs * factor)); // min 1 day
+                const newDue = new Date(start.getTime() + newDurationMs);
+                return {
+                  id:        m.id,
+                  title:     m.title,
+                  startDate: m.startDate,
+                  dueDate:   fmtDate(newDue),
+                };
+              }
+
+              return m;
+            });
+
+            const intentLabels: Record<string, string> = {
+              relevel_capacity:  `re-levelled for ${weeklyHours ?? 20} hr/week`,
+              shift_phases:      `shifted ${shiftWeeks && shiftWeeks > 0 ? "+" : ""}${shiftWeeks ?? 1} week(s)`,
+              compress_timeline: `compressed to ${Math.round((scaleFactor ?? 0.75) * 100)}%`,
+              expand_timeline:   `expanded to ${Math.round((scaleFactor ?? 1.33) * 100)}%`,
+            };
+
+            return {
+              action:   "smart_reschedule_gantt",
+              projectId,
+              intent,
+              updates:  updated,
+              message:  `Timeline ${intentLabels[intent] ?? intent}. ${updated.length} milestone(s) updated. Review and save to apply.`,
+            };
+          },
         }),
       },
     });
