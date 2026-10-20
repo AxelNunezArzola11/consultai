@@ -1,20 +1,16 @@
-// Disable static pre-rendering: this page reads from the DB at request time.
-// Without this, next build would attempt to statically generate it and fail
-// when DATABASE_URL is not available in the build environment.
+// Disable static pre-rendering: reads DB at request time.
 export const dynamic = "force-dynamic";
 
 import Link from "next/link";
 import { db } from "@/lib/db";
 import { projects, milestones } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DeleteProjectButton } from "@/components/shared/DeleteProjectButton";
 
 /**
  * Company dashboard — server component.
- * Shows the seeded project and its milestones.
- * Phase 0: read-only display of DB data. Interactive features added in Phases 1+.
+ * Visual: AG Studio Midnight cards, status pills, clean typography.
  */
 export default async function DashboardPage() {
   const projectList = await db
@@ -23,20 +19,31 @@ export default async function DashboardPage() {
     .limit(10);
 
   return (
-    <div className="px-6 py-8 max-w-4xl mx-auto w-full space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold">Dashboard</h1>
-        <p className="text-muted-foreground text-sm mt-1">
-          Your active projects and milestones
-        </p>
+    <div className="px-6 py-8 max-w-5xl mx-auto w-full space-y-8">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-foreground tracking-tight">Dashboard</h1>
+          <p className="text-muted-foreground text-sm mt-0.5">
+            Your active projects and milestones
+          </p>
+        </div>
+        <Link
+          href="/project/new"
+          className="inline-flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold px-3 py-2 hover:bg-primary/90 active:scale-[0.97] transition-all shadow-sm shadow-primary/20"
+        >
+          <span className="text-sm leading-none">+</span> New project
+        </Link>
       </div>
 
       {projectList.length === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center text-muted-foreground">
-            No projects yet. Run{" "}
-            <code className="bg-muted px-1 rounded text-xs">npm run seed</code>{" "}
-            to load demo data.
+        <Card className="border-border bg-card">
+          <CardContent className="py-16 text-center text-muted-foreground">
+            <div className="text-4xl mb-3 opacity-20">◈</div>
+            <p className="text-sm">No projects yet. Run{" "}
+              <code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono">npm run seed</code>{" "}
+              to load demo data.
+            </p>
           </CardContent>
         </Card>
       ) : (
@@ -47,6 +54,38 @@ export default async function DashboardPage() {
         </div>
       )}
     </div>
+  );
+}
+
+const NAV_TABS = [
+  { label: "Milestones",  segment: "milestones" },
+  { label: "Candidates",  segment: "candidates" },
+  { label: "Vetting",     segment: "vetting" },
+  { label: "Ledger",      segment: "ledger" },
+  { label: "Approvals",   segment: "approvals" },
+] as const;
+
+const STATUS_STYLES: Record<string, { bg: string; text: string; border: string; dot: string }> = {
+  planned:          { bg: "bg-slate-800/50",    text: "text-slate-400",   border: "border-slate-700/50",   dot: "bg-slate-500" },
+  funded:           { bg: "bg-primary/10",      text: "text-primary",     border: "border-primary/20",     dot: "bg-primary" },
+  submitted:        { bg: "bg-amber-950/30",    text: "text-amber-400",   border: "border-amber-800/40",   dot: "bg-amber-400" },
+  verifying:        { bg: "bg-amber-950/30",    text: "text-amber-400",   border: "border-amber-800/40",   dot: "bg-amber-400" },
+  pending_approval: { bg: "bg-amber-950/30",    text: "text-amber-400",   border: "border-amber-800/40",   dot: "bg-amber-400" },
+  paid:             { bg: "bg-emerald-950/40",  text: "text-emerald-400", border: "border-emerald-800/50", dot: "bg-emerald-400" },
+  disputed:         { bg: "bg-rose-950/30",     text: "text-rose-400",    border: "border-rose-800/40",    dot: "bg-rose-400" },
+  cancelled:        { bg: "bg-slate-800/40",    text: "text-slate-500",   border: "border-slate-700/40",   dot: "bg-slate-600" },
+  failed:           { bg: "bg-rose-950/30",     text: "text-rose-400",    border: "border-rose-800/40",    dot: "bg-rose-400" },
+  returned:         { bg: "bg-slate-800/40",    text: "text-slate-500",   border: "border-slate-700/40",   dot: "bg-slate-600" },
+};
+
+function StatusPill({ status }: { status: string }) {
+  const s = STATUS_STYLES[status] ?? STATUS_STYLES.planned;
+  const label = status.replace(/_/g, " ");
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full border ${s.bg} ${s.text} ${s.border}`}>
+      <span className={`inline-block w-1.5 h-1.5 rounded-full ${s.dot}`} />
+      {label}
+    </span>
   );
 }
 
@@ -61,92 +100,89 @@ async function ProjectCard({
     .where(eq(milestones.projectId, project.id))
     .orderBy(milestones.position);
 
-  const statusColour: Record<string, string> = {
-    planned: "secondary",
-    funded: "default",
-    submitted: "outline",
-    verifying: "outline",
-    pending_approval: "outline",
-    paid: "default",
-    disputed: "destructive",
-    cancelled: "secondary",
-  };
+  const totalBudget = milestoneList.reduce((acc, m) => acc + Number(m.budgetUsd), 0);
+  const paidCount = milestoneList.filter((m) => m.status === "paid").length;
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-lg">
-            <Link
-              href={`/project/${project.id}/milestones`}
-              className="hover:underline"
-            >
-              {project.title}
-            </Link>
-          </CardTitle>
-          <div className="flex items-center gap-2">
-            <Badge variant="outline">{project.status}</Badge>
+    <Card className="border-border bg-card shadow-md hover:shadow-lg transition-all overflow-hidden">
+      {/* Top accent line */}
+      <div className="h-0.5 bg-primary/60 inset-x-0 top-0" />
+
+      <CardHeader className="pb-3 pt-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <CardTitle className="text-base">
+              <Link
+                href={`/project/${project.id}/milestones`}
+                className="text-foreground hover:text-primary transition-colors font-semibold"
+              >
+                {project.title}
+              </Link>
+            </CardTitle>
+            {project.rawBrief && (
+              <p className="text-xs text-muted-foreground line-clamp-2 mt-1 leading-relaxed">
+                {project.rawBrief}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <StatusPill status={project.status} />
             <DeleteProjectButton
               projectId={project.id}
               projectTitle={project.title}
             />
           </div>
         </div>
-        {/* Quick-nav links to the most-used project sub-pages */}
-        <div className="flex flex-wrap gap-2 mt-2">
-          {[
-            { label: "Milestones",  href: `/project/${project.id}/milestones` },
-            { label: "Candidates",  href: `/project/${project.id}/candidates` },
-            { label: "Vetting",     href: `/project/${project.id}/vetting` },
-            { label: "Ledger",      href: `/project/${project.id}/ledger` },
-            { label: "Approvals",   href: `/project/${project.id}/approvals` },
-          ].map(({ label, href }) => (
+
+        {/* Stats strip */}
+        <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
+          <span>
+            <strong className="text-foreground tabular-nums">{milestoneList.length}</strong> milestones
+          </span>
+          <span>
+            <strong className="text-emerald-400 tabular-nums">{paidCount}</strong> paid
+          </span>
+          {totalBudget > 0 && (
+            <span>
+              <strong className="text-foreground tabular-nums">${totalBudget.toLocaleString()}</strong> total
+            </span>
+          )}
+        </div>
+
+        {/* Quick-nav pills */}
+        <div className="flex flex-wrap gap-1.5 mt-3">
+          {NAV_TABS.map(({ label, segment }) => (
             <Link
-              key={href}
-              href={href}
-              className="text-xs text-muted-foreground hover:text-foreground border rounded px-2 py-0.5 transition-colors"
+              key={segment}
+              href={`/project/${project.id}/${segment}`}
+              className="text-[11px] font-medium text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/70 border border-border hover:border-border px-2.5 py-1 rounded-md transition-all"
             >
               {label}
             </Link>
           ))}
         </div>
-        {project.rawBrief && (
-          <p className="text-sm text-muted-foreground line-clamp-2 mt-1">
-            {project.rawBrief}
-          </p>
-        )}
       </CardHeader>
-      <CardContent>
-        <h3 className="text-sm font-medium mb-2">Milestones</h3>
+
+      <CardContent className="pt-0">
         {milestoneList.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No milestones yet.</p>
+          <p className="text-xs text-muted-foreground py-2">No milestones yet.</p>
         ) : (
-          <ul className="space-y-2">
+          <div className="space-y-1">
             {milestoneList.map((m) => (
-              <li
+              <div
                 key={m.id}
-                className="flex items-center justify-between text-sm border rounded-lg px-3 py-2"
+                className="flex items-center justify-between text-xs rounded-lg px-3 py-2 bg-muted/20 border border-border/50 hover:bg-muted/40 transition-colors"
               >
-                <span className="font-medium">{m.title}</span>
-                <div className="flex items-center gap-3">
-                  <span className="text-muted-foreground">
+                <span className="font-medium text-foreground/90 truncate mr-3">{m.title}</span>
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="text-muted-foreground tabular-nums">
                     ${Number(m.budgetUsd).toLocaleString()}
                   </span>
-                  <Badge
-                    variant={
-                      (statusColour[m.status] as
-                        | "default"
-                        | "secondary"
-                        | "outline"
-                        | "destructive") ?? "outline"
-                    }
-                  >
-                    {m.status}
-                  </Badge>
+                  <StatusPill status={m.status} />
                 </div>
-              </li>
+              </div>
             ))}
-          </ul>
+          </div>
         )}
       </CardContent>
     </Card>

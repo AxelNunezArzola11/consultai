@@ -17,6 +17,7 @@ import { db } from "@/lib/db";
 import { candidates, signals as signalsTable, projects } from "@/lib/db/schema";
 import { eq, sql, inArray } from "drizzle-orm";
 import { CandidatesVettingClient } from "./CandidatesVettingClient";
+import { VettingAIHarness } from "@/components/agent/VettingAIHarness";
 import { requirementsFromProject } from "@/lib/vetting/requirements-from-project";
 
 interface Props {
@@ -95,6 +96,7 @@ export default async function CandidatesVettingPage({ params, searchParams }: Pr
     "Weights: github_repo=0.35, github_pr=0.30, portfolio=0.20, public_review=0.10, provided_link=0.05.";
 
   return (
+    <>
     <CandidatesVettingClient
       projectId={projectId}
       candidates={candidateRows.map((c) => ({
@@ -133,5 +135,7 @@ export default async function CandidatesVettingPage({ params, searchParams }: Pr
       scoringFormula={scoringFormula}
       initialQuery={query}
     />
+    <VettingAIHarness projectId={projectId} />
+    </>
   );
 }

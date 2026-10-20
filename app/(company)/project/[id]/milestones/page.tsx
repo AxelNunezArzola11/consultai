@@ -4,17 +4,38 @@ export const dynamic = "force-dynamic";
 import { db } from "@/lib/db";
 import { projects, milestones, auditLog } from "@/lib/db/schema";
 import { eq, desc } from "drizzle-orm";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { notFound } from "next/navigation";
 import { MoneyFlowPanel } from "@/components/payments/MoneyFlowPanel";
 import { MilestonesClientExtensions } from "./MilestonesClientExtensions";
 
 /**
  * Milestones page — Phase 1 Step 6.
- * Server component that renders milestone cards with MoneyFlowPanel.
- * Each milestone card shows the full animated money-flow UI with polling.
+ * Visual: AG Studio Midnight slate cards, status pills, polished typography.
  */
+
+const STATUS_STYLES: Record<string, { bg: string; text: string; border: string; dot: string; label: string }> = {
+  planned:          { bg: "bg-slate-800/50",    text: "text-slate-400",   border: "border-slate-700/50",   dot: "bg-slate-500",   label: "Planned" },
+  funded:           { bg: "bg-primary/10",      text: "text-primary",     border: "border-primary/20",     dot: "bg-primary",     label: "Held (simulated)" },
+  submitted:        { bg: "bg-amber-950/30",    text: "text-amber-400",   border: "border-amber-800/40",   dot: "bg-amber-400",   label: "Submitted" },
+  verifying:        { bg: "bg-amber-950/30",    text: "text-amber-400",   border: "border-amber-800/40",   dot: "bg-amber-400",   label: "Verifying" },
+  pending_approval: { bg: "bg-amber-950/30",    text: "text-amber-400",   border: "border-amber-800/40",   dot: "bg-amber-400",   label: "Awaiting Approval" },
+  paid:             { bg: "bg-emerald-950/40",  text: "text-emerald-400", border: "border-emerald-800/50", dot: "bg-emerald-400", label: "Paid" },
+  disputed:         { bg: "bg-rose-950/30",     text: "text-rose-400",    border: "border-rose-800/40",    dot: "bg-rose-400",    label: "Disputed" },
+  cancelled:        { bg: "bg-slate-800/40",    text: "text-slate-500",   border: "border-slate-700/40",   dot: "bg-slate-600",   label: "Cancelled" },
+  failed:           { bg: "bg-rose-950/30",     text: "text-rose-400",    border: "border-rose-800/40",    dot: "bg-rose-400",    label: "Failed" },
+  returned:         { bg: "bg-slate-800/40",    text: "text-slate-500",   border: "border-slate-700/40",   dot: "bg-slate-600",   label: "Returned" },
+};
+
+function StatusPill({ status }: { status: string }) {
+  const s = STATUS_STYLES[status] ?? STATUS_STYLES.planned;
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full border ${s.bg} ${s.text} ${s.border}`}>
+      <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${s.dot}`} />
+      {s.label ?? status}
+    </span>
+  );
+}
+
 export default async function MilestonesPage({
   params,
 }: {
@@ -36,7 +57,6 @@ export default async function MilestonesPage({
     .where(eq(milestones.projectId, id))
     .orderBy(milestones.position);
 
-  // Load latest audit log entries for all project milestones
   const auditEntries = milestoneList.length > 0
     ? await db
         .select()
@@ -46,32 +66,28 @@ export default async function MilestonesPage({
         .limit(100)
     : [];
 
-  const statusLabel: Record<string, string> = {
-    planned:          "Planned",
-    funded:           "Held (simulated)",
-    submitted:        "Submitted",
-    verifying:        "Verifying",
-    pending_approval: "Awaiting Approval",
-    paid:             "Paid",
-    disputed:         "Disputed",
-    cancelled:        "Cancelled",
-    failed:           "Failed",
-    returned:         "Returned",
-  };
-
-  const statusVariant = (status: string): "default" | "secondary" | "outline" | "destructive" => {
-    if (status === "paid" || status === "funded") return "default";
-    if (status === "failed" || status === "returned" || status === "disputed") return "destructive";
-    if (status === "verifying" || status === "pending_approval") return "secondary";
-    return "outline";
-  };
+  const totalBudget = milestoneList.reduce((acc, m) => acc + Number(m.budgetUsd), 0);
+  const paidCount = milestoneList.filter((m) => m.status === "paid").length;
 
   return (
-    <div className="px-6 py-8 max-w-4xl mx-auto w-full space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="px-6 py-6 max-w-5xl mx-auto w-full space-y-6">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-bold">{project.title}</h1>
-          <p className="text-muted-foreground text-sm mt-1">Milestones &amp; Payments</p>
+          <h1 className="text-xl font-bold text-foreground tracking-tight">{project.title}</h1>
+          <p className="text-muted-foreground text-sm mt-0.5">Milestones &amp; Payments</p>
+        </div>
+        {/* Budget stats */}
+        <div className="flex items-center gap-4 text-xs text-muted-foreground">
+          <div className="text-right">
+            <p className="text-[10px] uppercase tracking-wide font-medium">Total</p>
+            <p className="text-foreground font-semibold tabular-nums text-sm">${totalBudget.toLocaleString()}</p>
+          </div>
+          <div className="h-8 w-px bg-border" />
+          <div className="text-right">
+            <p className="text-[10px] uppercase tracking-wide font-medium">Paid</p>
+            <p className="text-emerald-400 font-semibold tabular-nums text-sm">{paidCount}/{milestoneList.length}</p>
+          </div>
         </div>
       </div>
 
@@ -97,11 +113,12 @@ export default async function MilestonesPage({
       />
 
       {milestoneList.length === 0 ? (
-        <div className="rounded-xl border bg-muted/30 p-8 text-center">
+        <div className="rounded-xl border border-border bg-card/50 p-8 text-center">
+          <div className="text-4xl mb-3 opacity-20">◈</div>
           <p className="text-muted-foreground text-sm">No milestones for this project.</p>
         </div>
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-3">
           {milestoneList.map((m) => {
             const relatedAudit = auditEntries
               .filter((a) => a.entityId === m.id)
@@ -113,35 +130,37 @@ export default async function MilestonesPage({
               }));
 
             return (
-              <Card key={m.id} className="overflow-hidden">
-                <CardHeader className="pb-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <CardTitle className="text-base">{m.title}</CardTitle>
-                    <Badge variant={statusVariant(m.status)}>
-                      {statusLabel[m.status] ?? m.status}
-                    </Badge>
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {m.description && (
-                    <p className="text-sm text-muted-foreground">{m.description}</p>
-                  )}
-
-                  <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
-                    <span>
-                      Budget:{" "}
-                      <strong className="text-foreground">
-                        ${Number(m.budgetUsd).toLocaleString()} USD
-                      </strong>
-                    </span>
-                    {m.dueDate && (
-                      <span>
-                        Due: <strong className="text-foreground">{m.dueDate}</strong>
-                      </span>
+              <div
+                key={m.id}
+                className="rounded-xl border border-border bg-card overflow-hidden shadow-sm hover:shadow-md transition-all"
+              >
+                {/* Card header */}
+                <div className="px-4 pt-4 pb-3 flex items-center justify-between gap-3 border-b border-border/50">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold text-foreground">{m.title}</h3>
+                    {m.description && (
+                      <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{m.description}</p>
                     )}
                   </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <div className="text-right">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Budget</p>
+                      <p className="text-sm font-semibold text-foreground tabular-nums">
+                        ${Number(m.budgetUsd).toLocaleString()}
+                      </p>
+                    </div>
+                    {m.dueDate && (
+                      <div className="text-right">
+                        <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Due</p>
+                        <p className="text-xs text-foreground font-medium">{m.dueDate}</p>
+                      </div>
+                    )}
+                    <StatusPill status={m.status} />
+                  </div>
+                </div>
 
-                  {/* Money-flow panel — polling, animated, approval card */}
+                {/* Money-flow panel */}
+                <div className="px-4 pb-4 pt-3">
                   <MoneyFlowPanel
                     milestoneId={m.id}
                     milestoneTitle={m.title}
@@ -153,8 +172,8 @@ export default async function MilestonesPage({
                     initialCurrency={m.currency ?? null}
                     initialAudit={relatedAudit}
                   />
-                </CardContent>
-              </Card>
+                </div>
+              </div>
             );
           })}
         </div>
