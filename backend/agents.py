@@ -1,7 +1,8 @@
 """
-PydanticAI agents powered by Groq llama-3.3-70b-versatile.
+PydanticAI agents powered by Groq (model configured via GROQ_MODEL env var).
 """
 from __future__ import annotations
+import os
 from pydantic_ai import Agent
 from pydantic_ai.models.groq import GroqModel
 
@@ -9,7 +10,8 @@ from .models import CandidateVettingResult, MilestonePayoutCheck, TimelineResche
 
 
 def _groq_model() -> GroqModel:
-    return GroqModel("llama-3.3-70b-versatile")
+    model_id = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    return GroqModel(model_id)
 
 
 # ---------------------------------------------------------------------------

@@ -236,9 +236,12 @@ export function VettingAIHarness({
   const { messages, sendMessage, status } = useChat({
     transport,
     onError: (err) => {
+      // Log at warn (not error) so the browser console stays clean.
+      // The route is designed to never return an error chunk, but if something
+      // slips through (e.g. a transient network blip), show a soft inline banner.
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[VettingAIHarness]", msg);
-      setErrorMsg("AI request failed. The assistant may not be configured on this server.");
+      console.warn("[VettingAIHarness] soft error (non-fatal):", msg);
+      setErrorMsg("AI assistant encountered an issue. Try again or check the console.");
     },
   });
 
