@@ -2,8 +2,6 @@
 PydanticAI agents powered by Groq llama-3.3-70b-versatile.
 """
 from __future__ import annotations
-
-import os
 from pydantic_ai import Agent
 from pydantic_ai.models.groq import GroqModel
 
@@ -11,10 +9,7 @@ from .models import CandidateVettingResult, MilestonePayoutCheck, TimelineResche
 
 
 def _groq_model() -> GroqModel:
-    return GroqModel(
-        "llama-3.3-70b-versatile",
-        api_key=os.environ["GROQ_API_KEY"],
-    )
+    return GroqModel("llama-3.3-70b-versatile")
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +18,7 @@ def _groq_model() -> GroqModel:
 
 vetting_agent: Agent[None, CandidateVettingResult] = Agent(
     model=_groq_model(),
-    result_type=CandidateVettingResult,
+    output_type=CandidateVettingResult,
     system_prompt=(
         "You are an expert code reviewer evaluating freelance candidates for a consulting platform. "
         "Analyse the provided GitHub pull request diff and return a structured vetting result. "
@@ -54,7 +49,7 @@ async def run_vetting(candidate_id: str, pr_number: int, diff: str) -> Candidate
 
 payout_agent: Agent[None, MilestonePayoutCheck] = Agent(
     model=_groq_model(),
-    result_type=MilestonePayoutCheck,
+    output_type=MilestonePayoutCheck,
     system_prompt=(
         "You are a milestone payout evaluator for a consulting platform. "
         "Given a milestone's details, candidate trust score, and test status, "
@@ -96,7 +91,7 @@ async def run_payout_check(
 
 reschedule_agent: Agent[None, TimelineReschedulePlan] = Agent(
     model=_groq_model(),
-    result_type=TimelineReschedulePlan,
+    output_type=TimelineReschedulePlan,
     system_prompt=(
         "You are a project timeline analyst for a consulting platform. "
         "Given a project's current milestone statuses and blockers, "
