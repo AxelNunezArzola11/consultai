@@ -23,7 +23,7 @@ import { candidates, signals as signalsTable } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/db/audit";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
-import { fetchGitHubRepos } from "./github-fetcher";
+import { fetchGitHubRepo, fetchGitHubPrFiles, fetchGitHubRepos } from "./github-fetcher";
 import { safeFetch, validateUrl, LinkedInBlockedError, SsrfBlockedError } from "./ssrf-safe-fetch";
 import { extractSignals } from "./llm-extraction";
 import { computeTrustScore, buildMatrix, buildScoreBreakdown, type Signal } from "./signals";
@@ -120,20 +120,57 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
     }
   }
 
-  // 4. GitHub profile + repos
+  // 4. GitHub profile + repos (with README and config file content)
   if (candidate.githubHandle) {
     try {
       const reposResult = await fetchGitHubRepos(candidate.githubHandle);
-      // Each repo is a potential source
-      for (const repo of reposResult.data.slice(0, 5)) { // limit to 5 most-recent repos
-        const sourceUrl = repo.htmlUrl;
-        // Build minimal content from repo metadata
-        const content = [
-          repo.description ?? "",
-          `Language: ${repo.language ?? "unknown"}`,
-          `Topics: ${repo.topics.join(", ")}`,
-          `Stars: ${repo.stargazersCount}`,
-        ].join("\n");
+      // Process top 5 most-recently-updated repos
+      for (const repoSummary of reposResult.data.slice(0, 5)) {
+        const sourceUrl = repoSummary.htmlUrl;
+        const [owner, repoName] = repoSummary.fullName.split("/");
+
+        // Fetch full repo detail: README + languages + config files
+        let repoDetail;
+        try {
+          const detailResult = await fetchGitHubRepo(owner, repoName);
+          repoDetail = detailResult.data;
+        } catch (fetchErr) {
+          // If detailed fetch fails, fall back to summary-only metadata
+          errors.push(
+            `GitHub repo detail fetch failed for ${repoSummary.fullName}: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`
+          );
+          repoDetail = null;
+        }
+
+        // Build rich content for the LLM
+        const contentParts: string[] = [
+          `Repository: ${repoSummary.fullName}`,
+          repoSummary.description ? `Description: ${repoSummary.description}` : "",
+          `Language: ${repoSummary.language ?? "unknown"}`,
+          `Topics: ${repoSummary.topics.join(", ")}`,
+          `Stars: ${repoSummary.stargazersCount}`,
+        ];
+
+        if (repoDetail) {
+          // Languages breakdown
+          const langEntries = Object.entries(repoDetail.languages)
+            .sort(([, a], [, b]) => b - a)
+            .map(([lang, bytes]) => `${lang}: ${bytes}`)
+            .join(", ");
+          if (langEntries) contentParts.push(`Languages (bytes): ${langEntries}`);
+
+          // README
+          if (repoDetail.readme) {
+            contentParts.push("", "--- README ---", repoDetail.readme);
+          }
+
+          // Config / dependency files
+          for (const [filename, fileContent] of Object.entries(repoDetail.configFiles)) {
+            contentParts.push("", `--- ${filename} ---`, fileContent);
+          }
+        }
+
+        const content = contentParts.filter(Boolean).join("\n");
 
         const result = await extractSignals({
           candidateId,
@@ -161,11 +198,76 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
         });
 
         if (result.error) {
-          errors.push(`GitHub repo ${repo.name}: ${result.error}`);
+          errors.push(`GitHub repo ${repoSummary.name}: ${result.error}`);
         }
       }
     } catch (err) {
       errors.push(`GitHub fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // 4b. GitHub PR signals — parse owner/repo/pull_number from signal source URLs
+  //   Source URL format: https://github.com/{owner}/{repo}/pull/{number}
+  //   These are stored as github_pr signals in the candidate's provided links.
+  if (candidate.githubHandle) {
+    const prUrlPattern = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/;
+    // portfolioUrl may be a PR link; also check any future prLinks field
+    const prCandidate = candidate.portfolioUrl ?? "";
+    const prMatch = prUrlPattern.exec(prCandidate);
+    if (prMatch) {
+      const [, prOwner, prRepo, prNumStr] = prMatch;
+      const prNumber = parseInt(prNumStr, 10);
+      try {
+        const prFilesResult = await fetchGitHubPrFiles(prOwner, prRepo, prNumber);
+        const files = prFilesResult.data;
+
+        const contentParts: string[] = [
+          `Pull Request: ${prCandidate}`,
+          `Changed files: ${files.length}`,
+          `Total additions: ${files.reduce((s, f) => s + f.additions, 0)}`,
+          `Total deletions: ${files.reduce((s, f) => s + f.deletions, 0)}`,
+          "",
+          "--- PR File Diffs ---",
+        ];
+
+        for (const f of files) {
+          contentParts.push(`File: ${f.filename} (${f.status}, +${f.additions}/-${f.deletions})`);
+          if (f.patch) contentParts.push(f.patch);
+        }
+
+        const content = contentParts.join("\n");
+
+        const result = await extractSignals({
+          candidateId,
+          signalType: "github_pr",
+          sourceUrl: prCandidate,
+          content,
+          requirements,
+        });
+
+        fabricatedDropped += result.fabricatedDropped;
+        if (result.usedFallback) usedFallback = true;
+        allSignals.push(...result.signals);
+
+        debugLog.push({
+          sourceUrl: prCandidate,
+          signalType: "github_pr",
+          requirementsSent: requirements,
+          promptSent: result.debugPrompt,
+          llmOutput: result.debugLlmOutput,
+          rawLlmText: result.debugRawText,
+          error: result.error,
+          usedFallback: result.usedFallback,
+          signalsProduced: result.signals.length,
+          fabricatedDropped: result.fabricatedDropped,
+        });
+
+        if (result.error) {
+          errors.push(`GitHub PR ${prCandidate}: ${result.error}`);
+        }
+      } catch (err) {
+        errors.push(`GitHub PR fetch failed for ${prCandidate}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 
