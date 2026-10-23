@@ -15,6 +15,10 @@
  *     https://docs.github.com/en/rest/repos/contents#get-a-repository-readme
  *   GET /repos/{owner}/{repo}/languages
  *     https://docs.github.com/en/rest/repos/repos#list-repository-languages
+ *   GET /repos/{owner}/{repo}/contents/{path}
+ *     https://docs.github.com/en/rest/repos/contents#get-repository-content
+ *   GET /repos/{owner}/{repo}/pulls/{pull_number}/files
+ *     https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files
  *
  * Security:
  * - Only fetches from api.github.com (hardcoded, not configurable).
@@ -29,6 +33,18 @@
 const GITHUB_API = "https://api.github.com";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_REPOS = 30; // limit to avoid burning rate limit
+
+/** Well-known dependency/config filenames to fetch content for */
+const CONFIG_FILE_CANDIDATES = [
+  "package.json",
+  "requirements.txt",
+  "next.config.js",
+  "next.config.ts",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+  "composer.json",
+] as const;
 
 export interface GitHubUserProfile {
   login: string;
@@ -69,6 +85,18 @@ export interface GitHubRepoDetail {
   readme: string | null;
   /** Language name → byte count */
   languages: Record<string, number>;
+  /** Key config/dependency file contents keyed by filename — UNTRUSTED */
+  configFiles: Record<string, string>;
+}
+
+/** A single changed file from a pull request */
+export interface GitHubPrFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  /** Unified diff patch — may be absent for binary files */
+  patch: string | null;
 }
 
 export interface GitHubRateLimit {
@@ -89,6 +117,9 @@ export interface GitHubFetchResult<T> {
 // ---------------------------------------------------------------------------
 
 const MAX_README_CHARS = 3000;
+const MAX_CONFIG_FILE_CHARS = 1500;
+const MAX_PR_PATCH_CHARS = 300;
+const MAX_PR_FILES = 20;
 
 function githubHeaders(): Record<string, string> {
   const h: Record<string, string> = {
@@ -246,7 +277,66 @@ export async function fetchGitHubRepo(
     const languages: Record<string, number> =
       languagesResult.status === "fulfilled" ? languagesResult.value.data : {};
 
-    return { data: { summary, readme, languages }, rateLimit, etag };
+    // Fetch key config/dependency files in parallel (best-effort; 404s are skipped)
+    const configFiles: Record<string, string> = {};
+    const configResults = await Promise.allSettled(
+      CONFIG_FILE_CANDIDATES.map((filename) =>
+        githubGet<Record<string, unknown>>(
+          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${filename}`,
+          ac.signal
+        ).then((r) => ({ filename, data: r.data }))
+      )
+    );
+
+    for (const result of configResults) {
+      if (result.status === "fulfilled") {
+        const { filename, data } = result.value;
+        if (data.content && data.encoding === "base64") {
+          const decoded = Buffer.from(String(data.content).replace(/\n/g, ""), "base64").toString("utf-8");
+          configFiles[filename] = decoded.slice(0, MAX_CONFIG_FILE_CHARS);
+        }
+      }
+      // 404s (file not present) are silently skipped — they are normal
+    }
+
+    return { data: { summary, readme, languages, configFiles }, rateLimit, etag };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetch the list of changed files (with patches) for a GitHub Pull Request.
+ *
+ * Endpoint: GET /repos/{owner}/{repo}/pulls/{pull_number}/files
+ * Returns up to MAX_PR_FILES files with their unified diffs truncated to MAX_PR_PATCH_CHARS each.
+ */
+export async function fetchGitHubPrFiles(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  timeoutMs = DEFAULT_TIMEOUT_MS
+): Promise<GitHubFetchResult<GitHubPrFile[]>> {
+  validateGitHubHandle(owner);
+  validateRepoName(repo);
+  if (!Number.isInteger(pullNumber) || pullNumber < 1) {
+    throw new GitHubValidationError(`Invalid pull request number: ${pullNumber}`);
+  }
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const result = await githubGet<Record<string, unknown>[]>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/files?per_page=${MAX_PR_FILES}`,
+      ac.signal
+    );
+    const files: GitHubPrFile[] = result.data.slice(0, MAX_PR_FILES).map((f) => ({
+      filename: String(f.filename ?? ""),
+      status: String(f.status ?? ""),
+      additions: Number(f.additions ?? 0),
+      deletions: Number(f.deletions ?? 0),
+      patch: f.patch != null ? String(f.patch).slice(0, MAX_PR_PATCH_CHARS) : null,
+    }));
+    return { data: files, rateLimit: result.rateLimit, etag: result.etag };
   } finally {
     clearTimeout(timer);
   }

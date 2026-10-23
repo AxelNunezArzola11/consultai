@@ -32,9 +32,9 @@ import {
   type SignalType,
 } from "./signals";
 
-export const PROMPT_VERSION = "vetting-v1";
+export const PROMPT_VERSION = "vetting-v2";
 
-const MAX_CONTENT_CHARS = 4000;
+const MAX_CONTENT_CHARS = 12_000;
 const MAX_EXCERPT_CHARS = 300;
 const MAX_FACT_CHARS = 500;
 
