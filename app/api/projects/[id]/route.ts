@@ -1,4 +1,15 @@
 /**
+ * PATCH /api/projects/[id]
+ *
+ * Partially updates a project's mutable fields.
+ * Currently supported fields:
+ *   - githubRepoUrl (string | null)
+ *
+ * Auth: requires company role cookie.
+ * Returns 200 { ok: true } on success, 404 if not found, 403 if unauthorized.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
  * DELETE /api/projects/[id]
  *
  * Deletes a project and all its dependent records in topological order
@@ -41,6 +52,70 @@ import {
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
 
 export const dynamic = "force-dynamic";
+
+// ---------------------------------------------------------------------------
+// PATCH — update mutable project fields (e.g. githubRepoUrl)
+// ---------------------------------------------------------------------------
+
+const GITHUB_REPO_URL_PATTERN = /^https:\/\/github\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+\/?$/;
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+): Promise<NextResponse> {
+  const role = await getRoleFromCookie(req.headers.get("cookie"));
+  if (role !== "company") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const { id: projectId } = await params;
+
+  let body: { githubRepoUrl?: string | null };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  // Validate the repo URL when provided
+  if (body.githubRepoUrl != null) {
+    if (typeof body.githubRepoUrl !== "string") {
+      return NextResponse.json({ error: "githubRepoUrl must be a string or null" }, { status: 400 });
+    }
+    if (!GITHUB_REPO_URL_PATTERN.test(body.githubRepoUrl)) {
+      return NextResponse.json(
+        { error: "githubRepoUrl must be a valid GitHub repository URL (https://github.com/owner/repo)" },
+        { status: 400 }
+      );
+    }
+  }
+
+  try {
+    const [existing] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+
+    if (!existing) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+
+    await db
+      .update(projects)
+      .set({ githubRepoUrl: body.githubRepoUrl ?? null, updatedAt: new Date() })
+      .where(eq(projects.id, projectId));
+
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DELETE — cascade-delete the project and all dependent records
+// ---------------------------------------------------------------------------
 
 export async function DELETE(
   req: NextRequest,

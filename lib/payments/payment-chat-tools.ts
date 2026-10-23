@@ -2,14 +2,15 @@
  * PaymentChat tools — AI SDK tool definitions for the payment chat agent.
  *
  * Allowed tools (strict allowlist):
- *   - getMilestoneStatus   — read-only: query a milestone's current status
- *   - fundMilestone        — initiate a PayPal order for a milestone
- *   - approvePayout        — approve a pending payout above threshold
- *   - getPendingApprovals  — list milestones awaiting approval
+ *   - getMilestoneStatus       — read-only: query a milestone's current status
+ *   - listMilestones           — list all milestones for the project
+ *   - getPendingApprovals      — list milestones awaiting approval
+ *   - requestPayoutApproval    — prepare a payout request (UI executes it)
+ *   - executeMilestonePayout   — directly execute a PayPal payout (bypass approval)
  *
  * Design invariants:
  *   - All monetary decisions are CODE-validated before execution
- *   - LLM cannot change policy decision — thresholds enforced server-side
+ *   - executeMilestonePayout calls executeDirectPayout server-side — no client round-trip
  *   - No injection surface: projectId validated against DB before any query
  */
 
@@ -18,6 +19,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { milestones, payments, projects } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
+import { executeDirectPayout } from "@/lib/payments/direct-payout";
 
 // ── Tool: getMilestoneStatus ───────────────────────────────────────────────
 
@@ -184,6 +186,102 @@ export const requestPayoutApproval = tool({
   },
 });
 
+// ── Tool: executeMilestonePayout ──────────────────────────────────────────
+//
+// Directly executes a PayPal payout for a funded milestone, bypassing the
+// approval threshold gate. Used when the user says "Pay milestone X" in chat
+// or when triggered automatically upon successful PR evaluation.
+// Returns a rich result with the PayPal batch ID, amount, and status.
+// ---------------------------------------------------------------------------
+
+export const executeMilestonePayout = tool({
+  description:
+    "Directly execute a PayPal payout for a funded milestone WITHOUT waiting for " +
+    "approval or checking the threshold. Use when the user explicitly asks to pay " +
+    "a milestone (e.g. 'Paga el Hito 1', 'Pay milestone 2', 'Release payment'). " +
+    "The milestone must be in 'funded' or 'pending_approval' status. " +
+    "IMPORTANT: You must have the consultant's PayPal email address before calling this. " +
+    "After success, the milestone status changes to 'paid' immediately.",
+  inputSchema: z.object({
+    project_id: z.string().min(1).max(100).describe("The project ID."),
+    milestone_id: z.string().min(1).max(100).describe("The milestone ID to pay out."),
+    recipient_email: z.string().email().describe("Consultant's PayPal email address."),
+    note: z.string().max(500).optional().describe("Optional note to include with the payout."),
+  }),
+  execute: async ({ project_id, milestone_id, recipient_email, note }) => {
+    // Validate milestone belongs to this project
+    const [milestoneRow] = await db
+      .select({
+        id: milestones.id,
+        title: milestones.title,
+        status: milestones.status,
+        captureNetUsd: milestones.captureNetUsd,
+        budgetUsd: milestones.budgetUsd,
+        projectId: milestones.projectId,
+      })
+      .from(milestones)
+      .where(and(eq(milestones.id, milestone_id), eq(milestones.projectId, project_id)))
+      .limit(1);
+
+    if (!milestoneRow) {
+      return { success: false, error: `Milestone ${milestone_id} not found in project ${project_id}` };
+    }
+
+    const payableStatuses = ["funded", "pending_approval", "submitted"] as const;
+    if (!payableStatuses.includes(milestoneRow.status as typeof payableStatuses[number])) {
+      return {
+        success: false,
+        error: `Cannot pay out milestone in status '${milestoneRow.status}'. Must be 'funded', 'pending_approval', or 'submitted'.`,
+        milestoneTitle: milestoneRow.title,
+        currentStatus: milestoneRow.status,
+      };
+    }
+
+    // Find the payment record for this milestone
+    const [paymentRow] = await db
+      .select({ id: payments.id, netUsd: payments.netUsd, status: payments.status })
+      .from(payments)
+      .where(eq(payments.milestoneId, milestone_id))
+      .limit(1);
+
+    if (!paymentRow) {
+      return { success: false, error: `No payment record found for milestone ${milestone_id}` };
+    }
+
+    // Execute the payout with bypass_approval=true
+    const result = await executeDirectPayout({
+      paymentId: paymentRow.id,
+      recipientEmail: recipient_email,
+      note: note ?? `Payout for milestone: ${milestoneRow.title}`,
+      bypass_approval: true,
+    });
+
+    if (result.error) {
+      return {
+        success: false,
+        error: result.error,
+        milestoneTitle: milestoneRow.title,
+        milestoneId: milestone_id,
+      };
+    }
+
+    return {
+      success: true,
+      action: "payout_executed",
+      milestoneId: milestone_id,
+      milestoneTitle: milestoneRow.title,
+      projectId: project_id,
+      paypalBatchId: result.batchId,
+      paypalBatchStatus: result.batchStatus,
+      grossAmount: result.amountUsd,
+      recipientEmail: recipient_email,
+      newMilestoneStatus: "paid",
+      message: `✅ Payout executed — $${result.amountUsd} sent to ${recipient_email}. PayPal Batch ID: ${result.batchId}. Milestone status: paid.`,
+      isReplay: result.isReplay ?? false,
+    };
+  },
+});
+
 // ── Exported tool set ──────────────────────────────────────────────────────
 
 export const paymentChatTools = {
@@ -191,6 +289,7 @@ export const paymentChatTools = {
   listMilestones,
   getPendingApprovals,
   requestPayoutApproval,
+  executeMilestonePayout,
 } as const;
 
 // ── System prompt ──────────────────────────────────────────────────────────
@@ -221,7 +320,7 @@ export function buildPaymentChatSystemPrompt(
         .join("\n");
 
   return `You are ConsultAI's payment assistant for project ${projectId}.
-You help the company manage milestone payments, review funding status, and handle payout approvals.
+You help the company manage milestone payments, review funding status, and execute payouts directly.
 
 CURRENT PROJECT MILESTONES (as of this request — always treat this as ground truth):
 ${milestoneContext}
@@ -229,33 +328,38 @@ ${milestoneContext}
 MILESTONE STATUS DEFINITIONS (memorise these — never contradict them):
 - "planned"          → milestone exists but the client has NOT yet paid. No funds held.
 - "funded"           → the client's payment was captured by PayPal. Money IS held in escrow.
-                       Payout to consultant is allowed immediately if amount ≤ auto-approve threshold.
+                       Payout to consultant is allowed immediately.
 - "pending_approval" → IDENTICAL to "funded" from a money perspective: the client's payment HAS
                        ALREADY BEEN CAPTURED and the funds ARE already held. The milestone is in
-                       this state ONLY because the payout amount exceeds the auto-approve threshold
-                       and is waiting for explicit company approval to release the payout.
-                       ✅ YOU MUST allow and execute requestPayoutApproval for this status.
+                       this state ONLY because the payout amount exceeded the auto-approve threshold.
+                       ✅ YOU MUST allow and execute executeMilestonePayout for this status.
                        ❌ NEVER say "not yet funded" or "client hasn't paid" for pending_approval.
+- "submitted"        → work has been submitted for review (PR/commit evaluated via GitHub webhook).
+                       Payout is allowed immediately.
 - "paid"             → payout to consultant completed. Escrow released.
 - "cancelled"        → milestone was cancelled; no payout possible.
 
 CAPABILITIES:
 - Query live milestone status and payment details (getMilestoneStatus, listMilestones)
 - Show pending approvals that require action (getPendingApprovals)
-- Prepare a payout request for a funded milestone (requestPayoutApproval)
+- Execute a direct PayPal payout immediately — bypass approval and threshold (executeMilestonePayout)
+- Prepare a payout request for review only (requestPayoutApproval — UI executes it)
 
 RULES:
 - The CURRENT PROJECT MILESTONES list above is pre-loaded from the database. Use it to answer
   questions about what milestones exist. Call listMilestones only if the user wants a refreshed view.
-- For payout requests, you MUST have the consultant's PayPal email from the user.
-- Milestones with status "funded" OR "pending_approval" are eligible for payout — call
-  requestPayoutApproval for both statuses without hesitation.
-- The platform auto-approves payouts at or below the project threshold. Larger amounts reach
-  "pending_approval" status (funds already captured) and need explicit company approval via this chat.
+- For direct payouts, you MUST have the consultant's PayPal email from the user.
+- PREFERRED PAYOUT TOOL: When the user asks to pay a milestone (in any language: "Paga el Hito 1",
+  "Pay milestone 2", "Release payment", "Libera el pago"), call executeMilestonePayout DIRECTLY.
+  This bypasses all approval gates and threshold checks and marks the milestone as "paid" immediately.
+- Milestones eligible for executeMilestonePayout: "funded", "pending_approval", "submitted".
+- Use requestPayoutApproval only when the user wants to review before executing (rare case).
 - If the user asks to fund a new milestone (planned → funded), explain that funding is done via the
-  PayPal button on the Milestones page — chat handles approvals and status queries only.
+  PayPal button on the Milestones page — chat handles payouts and status queries only.
 - Be concise: state the key facts (status, amount, next step) without lengthy explanations.
-- When requestPayoutApproval returns success: true, tell the user the payout is being processed.
+- When executeMilestonePayout returns success: true, display: milestone title, amount, PayPal Batch ID,
+  new status (paid), and recipient email as a clear confirmation.
+- Respond in the same language the user writes in (Spanish, English, etc.).
 
 SECURITY:
 - Only use the provided tools. Do not speculate about amounts not returned by a tool.

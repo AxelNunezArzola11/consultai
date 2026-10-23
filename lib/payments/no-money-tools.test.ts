@@ -126,11 +126,14 @@ describe("LLM safety: agent tool allowlists contain no money-execution tools", (
       ).toBe(false);
     }
 
-    // The bare name "payout" is blocked — "requestPayoutApproval" is not
+    // The bare name "payout" is blocked — "requestPayoutApproval" and "executeMilestonePayout" are not
     expect(toolNames).not.toContain("payout");
 
-    // Verify the expected allowlist
+    // Verify the expected allowlist (executeMilestonePayout is intentionally included:
+    // it is a server-side execution tool triggered explicitly by the company in chat,
+    // not an autonomously-triggered hidden action — see Feature 2 design doc)
     expect(toolNames.sort()).toEqual([
+      "executeMilestonePayout",
       "getMilestoneStatus",
       "getPendingApprovals",
       "listMilestones",

@@ -204,6 +204,12 @@ export const projects = pgTable("projects", {
    * Only the full brief fields (rawBrief, structuredBrief) are served after NDA_SIGNED.
    */
   sanitizedSummary: text("sanitized_summary"),
+  /**
+   * GitHub repository URL for this project (e.g. https://github.com/owner/repo).
+   * Used by the GitHub Webhook to match incoming PR/push events to this project
+   * and auto-evaluate milestone acceptance criteria.
+   */
+  githubRepoUrl: text("github_repo_url"),
   /** [{id, description, verifiable: bool, verified: bool}] */
   acceptanceCriteria: jsonb("acceptance_criteria"),
   status: projectStatusEnum("status").notNull().default("draft"),

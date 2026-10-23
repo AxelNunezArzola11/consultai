@@ -51,8 +51,10 @@ function ps(...vals: PaymentStatus[]): ReadonlySet<PaymentStatus> {
 /** Allowed transitions: from → Set<to> */
 const MILESTONE_TRANSITIONS: Record<MilestoneStatus, ReadonlySet<MilestoneStatus>> = {
   planned:          ms("funded", "cancelled"),
-  funded:           ms("pending_approval", "submitted", "disputed", "cancelled"),
-  submitted:        ms("verifying", "cancelled"),
+  // funded → paid: direct bypass-approval payout (chat-triggered, no approval gate)
+  funded:           ms("pending_approval", "submitted", "paid", "disputed", "cancelled"),
+  // submitted → paid: bypass-approval payout after GitHub evaluation auto-approval
+  submitted:        ms("verifying", "paid", "cancelled"),
   // verifying → failed/returned: payout item fails/returns after batch is submitted.
   // These are real terminal transitions driven by PAYOUTS-ITEM.FAILED / RETURNED webhooks.
   verifying:        ms("pending_approval", "submitted", "paid", "failed", "returned"),

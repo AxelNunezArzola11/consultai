@@ -26,6 +26,7 @@ import { ChatPanel } from "@/components/agent/ChatPanel";
 import { MilestoneCanvas } from "@/components/canvas/MilestoneCanvas";
 import { ManualPlanEditor } from "@/components/canvas/ManualPlanEditor";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import Link from "next/link";
 
 // Gantt loaded client-side only (DnD requires browser)
@@ -75,6 +76,32 @@ function useDraftSave(projectId: string, agentSessionId: string) {
 // Component
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// GitHub repo URL input (persisted to DB on blur)
+// ---------------------------------------------------------------------------
+
+function useGithubRepoSave(projectId: string) {
+  return useCallback(
+    async (url: string) => {
+      if (!url) return;
+      try {
+        await fetch(`/api/projects/${projectId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ githubRepoUrl: url || null }),
+        });
+      } catch {
+        console.warn("[NewProjectClient] GitHub repo URL save failed");
+      }
+    },
+    [projectId]
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
 export function NewProjectClient({
   projectId,
   initialBrief,
@@ -93,6 +120,10 @@ export function NewProjectClient({
 
   // Show Gantt after plan is complete
   const [showGantt, setShowGantt] = useState(false);
+
+  // GitHub repo URL (linked repository for milestone auto-evaluation)
+  const [githubRepoUrl, setGithubRepoUrl] = useState("");
+  const saveGithubRepo = useGithubRepoSave(projectId);
 
   // Draft save
   const saveDraft = useDraftSave(projectId, agentSessionId);
@@ -170,20 +201,38 @@ export function NewProjectClient({
       {/* ─── Left: Chat ─────────────────────────────────────────────────── */}
       <div className="w-full md:w-[42%] flex-shrink-0 flex flex-col border-r bg-background overflow-hidden">
         {/* Chat panel header */}
-        <div className="px-4 py-3 border-b flex items-center justify-between flex-shrink-0">
-          <div>
-            <h1 className="font-semibold text-sm">New Project</h1>
-            <p className="text-xs text-muted-foreground">
-              Describe your project — the AI will build the plan
-            </p>
+        <div className="px-4 py-3 border-b flex flex-col gap-2 flex-shrink-0">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="font-semibold text-sm">New Project</h1>
+              <p className="text-xs text-muted-foreground">
+                Describe your project — the AI will build the plan
+              </p>
+            </div>
+            {plan && (
+              <Link href={`/project/${projectId}/milestones`}>
+                <Button size="sm" variant="outline" className="text-xs h-7">
+                  View milestones →
+                </Button>
+              </Link>
+            )}
           </div>
-          {plan && (
-            <Link href={`/project/${projectId}/milestones`}>
-              <Button size="sm" variant="outline" className="text-xs h-7">
-                View milestones →
-              </Button>
-            </Link>
-          )}
+
+          {/* GitHub repo URL — links project to a repo for milestone auto-evaluation */}
+          <div className="flex flex-col gap-1">
+            <label htmlFor="github-repo-url" className="text-xs font-medium text-muted-foreground">
+              GitHub Repository URL{" "}
+              <span className="font-normal">(optional — enables PR milestone evaluation)</span>
+            </label>
+            <Input
+              id="github-repo-url"
+              placeholder="https://github.com/owner/repo"
+              value={githubRepoUrl}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setGithubRepoUrl(e.target.value)}
+              onBlur={() => saveGithubRepo(githubRepoUrl)}
+              className="h-7 text-xs font-mono"
+            />
+          </div>
         </div>
 
         {/* Chat */}
