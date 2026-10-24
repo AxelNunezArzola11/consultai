@@ -18,7 +18,7 @@
  *   paypalCaptureId: string | null
  *   paypalPayoutBatchId: string | null
  *   payment: { id, status, grossUsd, feeUsd, netUsd, payoutFeeUsd } | null
- *   audit: { id, event, actor, createdAt }[]
+ *   audit: { id, event, actor, createdAt, payload }[]
  * }
  */
 
@@ -67,6 +67,7 @@ export async function GET(
       event:     auditLog.event,
       actor:     auditLog.actor,
       createdAt: auditLog.createdAt,
+      payload:   auditLog.payload,
     })
     .from(auditLog)
     .where(eq(auditLog.entityId, milestoneId))
@@ -89,6 +90,7 @@ export async function GET(
       event:     a.event,
       actor:     a.actor,
       createdAt: a.createdAt.toISOString(),
+      payload:   a.payload ?? null,
     })),
   });
 }
