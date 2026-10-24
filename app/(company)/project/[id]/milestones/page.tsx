@@ -127,6 +127,7 @@ export default async function MilestonesPage({
                 event:     a.event,
                 actor:     a.actor,
                 createdAt: a.createdAt.toISOString(),
+                payload:   (a.payload as Record<string, unknown> | null) ?? null,
               }));
 
             return (

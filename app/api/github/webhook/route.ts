@@ -377,12 +377,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
 
     if (passed) {
-      // Advance milestone to "submitted" — accepted criteria, ready for payout
-      // Only advance from planned or funded (not pending_approval — it's already funded)
+      // Advance milestone to "submitted" — pay-on-delivery: no prior funding required.
+      // Any active milestone (planned, funded, pending_approval) can move to submitted.
       if (milestone.status === "planned" || milestone.status === "funded" || milestone.status === "pending_approval") {
-        // For "planned" milestones, skip directly to "submitted" if already funded
-        // For "funded", go to "submitted"
-        const targetStatus = milestone.status === "planned" ? "submitted" : "submitted";
+        const targetStatus = "submitted";
         await db
           .update(milestones)
           .set({ status: targetStatus, updatedAt: new Date() })

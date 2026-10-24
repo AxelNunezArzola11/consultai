@@ -32,11 +32,22 @@ import { MilestoneFundButton, type FundResult } from "./MilestoneFundButton";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+interface EvalPayload {
+  trustScore:    number;
+  passed:        boolean;
+  threshold:     number;
+  criteriaCount: number;
+  passedCount:   number;
+  summary:       string | null;
+  error:         string | null;
+}
+
 interface AuditEntry {
   id:        string;
   event:     string;
   actor:     string;
   createdAt: string;
+  payload:   Record<string, unknown> | null;
 }
 
 interface PaymentSummary {
@@ -240,6 +251,7 @@ export function MoneyFlowPanel({
           event:     "CAPTURE_COMPLETED_BROWSER",
           actor:     "company",
           createdAt: new Date().toISOString(),
+          payload:   null,
         },
         ...prev.audit,
       ],
@@ -561,20 +573,51 @@ export function MoneyFlowPanel({
 
           {auditOpen && (
             <ul className="mt-3 space-y-2 border-l-2 border-border pl-3">
-              {state.audit.map((entry) => (
-                <li key={entry.id} className="text-xs">
-                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                    <span className="font-mono font-medium text-foreground">
-                      {entry.event}
-                    </span>
-                    <span className="text-muted-foreground">·</span>
-                    <span className="text-muted-foreground">{entry.actor}</span>
-                    <span className="text-muted-foreground ml-auto">
-                      {new Date(entry.createdAt).toLocaleTimeString()}
-                    </span>
-                  </div>
-                </li>
-              ))}
+              {state.audit.map((entry) => {
+                const isEval = entry.event === "GITHUB_MILESTONE_EVALUATED";
+                const ep = isEval ? (entry.payload as EvalPayload | null) : null;
+                return (
+                  <li key={entry.id} className="text-xs">
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                      <span className="font-mono font-medium text-foreground">
+                        {entry.event}
+                      </span>
+                      <span className="text-muted-foreground">·</span>
+                      <span className="text-muted-foreground">{entry.actor}</span>
+                      <span className="text-muted-foreground ml-auto">
+                        {new Date(entry.createdAt).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    {ep && (
+                      <div className="mt-1.5 rounded-md border bg-muted/40 px-2.5 py-2 space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-foreground">
+                            Trust Score:&nbsp;
+                            <span className={ep.trustScore >= ep.threshold ? "text-green-500" : "text-amber-500"}>
+                              {Math.round(ep.trustScore * 100)}%
+                            </span>
+                          </span>
+                          <span className={`ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold ${ep.passed ? "bg-green-500/15 text-green-600" : "bg-amber-500/15 text-amber-600"}`}>
+                            {ep.passed ? "PASSED" : "NOT PASSED"}
+                          </span>
+                        </div>
+                        <div className="text-muted-foreground">
+                          Criteria: {ep.passedCount}/{ep.criteriaCount} passed
+                          &nbsp;·&nbsp;threshold {Math.round(ep.threshold * 100)}%
+                        </div>
+                        {ep.summary && (
+                          <p className="text-muted-foreground leading-snug pt-0.5 border-t border-border">
+                            {ep.summary}
+                          </p>
+                        )}
+                        {ep.error && (
+                          <p className="text-red-500">Error: {ep.error}</p>
+                        )}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
