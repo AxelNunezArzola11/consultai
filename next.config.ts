@@ -15,8 +15,27 @@ import type { NextConfig } from "next";
  * All webhook/callback URLs MUST use APP_BASE_URL from env — never VERCEL_URL, never
  * window.location. Validated at startup in lib/constants/routes.ts.
  */
+import path from "path";
+
 const nextConfig: NextConfig = {
   // No special bundler config needed here — bundler is selected via CLI flag (--webpack).
+  webpack(config) {
+    // Alias the stub modules so webpack resolves them the same way TypeScript does.
+    // Remove these aliases (and the stubs in lib/ag-studio/stubs/) once the real
+    // `ag-studio` / `ag-studio-react` licensed packages are installed.
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      "ag-studio": path.resolve(
+        __dirname,
+        "lib/ag-studio/stubs/ag-studio.ts"
+      ),
+      "ag-studio-react": path.resolve(
+        __dirname,
+        "lib/ag-studio/stubs/ag-studio-react.ts"
+      ),
+    };
+    return config;
+  },
 };
 
 export default nextConfig;

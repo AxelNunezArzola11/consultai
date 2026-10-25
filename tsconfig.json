@@ -19,7 +19,9 @@
       }
     ],
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "ag-studio": ["./lib/ag-studio/stubs/ag-studio.ts"],
+      "ag-studio-react": ["./lib/ag-studio/stubs/ag-studio-react.ts"]
     }
   },
   "include": [

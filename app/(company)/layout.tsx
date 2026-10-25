@@ -35,6 +35,12 @@ export default function CompanyLayout({ children }: { children: ReactNode }) {
             Dashboard
           </Link>
           <Link
+            href="/planning"
+            className="text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Planning
+          </Link>
+          <Link
             href="/project/new"
             className="text-muted-foreground hover:text-foreground transition-colors"
           >
