@@ -238,9 +238,9 @@ export function MilestoneFundButton({
 
       <div className="space-y-2 mt-3">
         {displayAmount && feeEstimate && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-xs text-slate-400">
             You will be charged{" "}
-            <strong className="text-foreground">${displayAmount}</strong>
+            <strong className="text-slate-100">${displayAmount}</strong>
             {" "}(includes estimated PayPal fee ~${feeEstimate})
           </p>
         )}
@@ -248,17 +248,24 @@ export function MilestoneFundButton({
         <button
           onClick={() => { void handlePay(); }}
           disabled={!sdkReady || loading}
-          className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium
-            bg-[#0070ba] text-white hover:bg-[#005ea6] disabled:opacity-50
-            disabled:cursor-not-allowed transition-colors"
+          className="inline-flex items-center gap-2 rounded-2xl px-5 py-2.5 text-sm font-semibold
+            bg-[#0070ba] text-white hover:bg-[#005ea6] active:scale-[0.97]
+            disabled:opacity-50 disabled:cursor-not-allowed
+            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070ba] focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950
+            transition-all duration-200 shadow-lg shadow-[#0070ba]/20"
         >
           {loading ? (
             <>
-              <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" />
               Processing…
             </>
           ) : !sdkReady ? (
-            "Loading PayPal…"
+            <span className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-white/60 animate-pulse" />
+              <span className="w-2 h-2 rounded-full bg-white/60 animate-pulse" style={{ animationDelay: "150ms" }} />
+              <span className="w-2 h-2 rounded-full bg-white/60 animate-pulse" style={{ animationDelay: "300ms" }} />
+              Loading PayPal…
+            </span>
           ) : (
             <>
               <PayPalIcon />
@@ -268,12 +275,12 @@ export function MilestoneFundButton({
         </button>
 
         {sdkError && (
-          <p className="text-destructive text-xs">{sdkError}</p>
+          <p className="text-red-400 text-xs">{sdkError}</p>
         )}
 
         {/* Sandbox badge — always visible */}
         {paypalEnv === "sandbox" && (
-          <span className="inline-flex items-center rounded-full border border-amber-400 bg-amber-50 dark:bg-amber-950/30 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+          <span className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
             Sandbox mode
           </span>
         )}

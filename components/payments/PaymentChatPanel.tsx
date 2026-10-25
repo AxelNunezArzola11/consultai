@@ -19,10 +19,11 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -214,20 +215,20 @@ export function PaymentChatPanel({ projectId, milestones }: PaymentChatPanelProp
   ];
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full rounded-2xl overflow-hidden border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50">
       {/* Header */}
-      <div className="px-4 py-3 border-b bg-muted/30 flex-shrink-0">
-        <p className="text-sm font-medium">Payment Assistant</p>
-        <p className="text-xs text-muted-foreground mt-0.5">
+      <div className="px-4 py-3 border-b border-slate-800 bg-slate-950/60 flex-shrink-0">
+        <p className="text-sm font-semibold text-slate-100">Payment Assistant</p>
+        <p className="text-xs text-slate-400 mt-0.5">
           Ask about milestones, trigger payouts, or handle approvals in chat
         </p>
       </div>
 
       {/* Inline error */}
       {inlineError && (
-        <div className="mx-3 mt-2 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+        <div className="mx-3 mt-2 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
           <span className="flex-1">⚠️ {inlineError}</span>
-          <button onClick={() => setInlineError(null)} className="shrink-0 font-medium underline hover:no-underline">
+          <button onClick={() => setInlineError(null)} className="shrink-0 font-medium underline hover:no-underline transition-colors">
             Dismiss
           </button>
         </div>
@@ -235,11 +236,11 @@ export function PaymentChatPanel({ projectId, milestones }: PaymentChatPanelProp
 
       {/* Payout confirmation card */}
       {pendingPayoutAction && (
-        <div className="mx-3 mt-2 rounded-lg border border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/30 p-3 space-y-2">
-          <p className="text-xs font-semibold text-emerald-800 dark:text-emerald-300">
+        <div className="mx-3 mt-2 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-2">
+          <p className="text-xs font-semibold text-emerald-400">
             💸 Payout ready to execute
           </p>
-          <div className="text-xs text-emerald-700 dark:text-emerald-400 space-y-0.5">
+          <div className="text-xs text-emerald-300 space-y-0.5">
             <p><strong>Milestone:</strong> {pendingPayoutAction.milestoneTitle}</p>
             {pendingPayoutAction.captureNetUsd && (
               <p><strong>Amount:</strong> ${pendingPayoutAction.captureNetUsd}</p>
@@ -250,13 +251,13 @@ export function PaymentChatPanel({ projectId, milestones }: PaymentChatPanelProp
           <div className="flex gap-2">
             <Button
               size="sm"
-              className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700"
+              className="h-7 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl transition-colors duration-200 focus-visible:ring-2 focus-visible:ring-emerald-500"
               disabled={payoutLoading}
               onClick={handleExecutePayout}
             >
               {payoutLoading ? (
                 <span className="flex items-center gap-1.5">
-                  <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                  <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
                   Processing…
                 </span>
               ) : (
@@ -266,7 +267,7 @@ export function PaymentChatPanel({ projectId, milestones }: PaymentChatPanelProp
             <Button
               size="sm"
               variant="outline"
-              className="h-7 text-xs"
+              className="h-7 text-xs border-slate-600 text-slate-300 hover:bg-slate-800 hover:text-slate-100 rounded-xl transition-colors duration-200"
               disabled={payoutLoading}
               onClick={() => setPendingPayoutAction(null)}
             >
@@ -277,12 +278,12 @@ export function PaymentChatPanel({ projectId, milestones }: PaymentChatPanelProp
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
         {messages.length === 0 && !isLoading && (
-          <div className="text-center text-muted-foreground text-sm py-8">
+          <div className="text-center text-slate-400 text-sm py-8">
             <div className="text-2xl mb-2">💬</div>
-            <p className="font-medium">Payment Assistant</p>
-            <p className="text-xs mt-1 max-w-xs mx-auto">
+            <p className="font-medium text-slate-100">Payment Assistant</p>
+            <p className="text-xs mt-1 max-w-xs mx-auto text-slate-400">
               Ask about milestone statuses, trigger payouts, or check pending approvals.
             </p>
 
@@ -295,7 +296,7 @@ export function PaymentChatPanel({ projectId, milestones }: PaymentChatPanelProp
                     onClick={() => {
                       setInput(qa.text);
                     }}
-                    className="inline-flex text-xs rounded-full border px-2.5 py-1 bg-background hover:bg-muted transition-colors"
+                    className="inline-flex text-xs rounded-full border border-slate-700 px-2.5 py-1 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition-colors duration-200"
                   >
                     {qa.label}
                   </button>
@@ -309,14 +310,17 @@ export function PaymentChatPanel({ projectId, milestones }: PaymentChatPanelProp
           <PaymentMessageBubble key={msg.id} message={msg as { id: string; role: string; parts: MessagePart[] }} />
         ))}
 
+        {/* Thinking indicator — 3 pulsing dots */}
         {isLoading && (
-          <div className="flex gap-2 items-start">
-            <div className="w-6 h-6 rounded-full bg-primary/10 flex-shrink-0 flex items-center justify-center text-xs">
+          <div className="flex gap-2.5 items-start">
+            <div className="w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-slate-300">
               AI
             </div>
-            <div className="space-y-1.5 flex-1">
-              <Skeleton className="h-3 w-3/4" />
-              <Skeleton className="h-3 w-1/2" />
+            <div className="rounded-2xl rounded-tl-sm bg-slate-800 border border-slate-700 px-4 py-3 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" style={{ animationDelay: "0ms" }} />
+              <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" style={{ animationDelay: "150ms" }} />
+              <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" style={{ animationDelay: "300ms" }} />
+              <span className="ml-1.5 text-xs text-slate-400">thinking…</span>
             </div>
           </div>
         )}
@@ -325,7 +329,7 @@ export function PaymentChatPanel({ projectId, milestones }: PaymentChatPanelProp
       </div>
 
       {/* Input */}
-      <div className="border-t p-3 space-y-2 bg-background flex-shrink-0">
+      <div className="border-t border-slate-800 p-3 space-y-2 bg-slate-900/80 backdrop-blur-sm flex-shrink-0">
         <div className="flex gap-2 items-end">
           <textarea
             value={input}
@@ -334,18 +338,18 @@ export function PaymentChatPanel({ projectId, milestones }: PaymentChatPanelProp
             placeholder="Ask about payments, request a payout…"
             rows={2}
             disabled={isLoading}
-            className="flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 transition-opacity"
+            className="flex-1 resize-none rounded-xl border border-slate-700 bg-slate-800 text-slate-100 placeholder:text-slate-500 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 focus:border-transparent disabled:opacity-50 transition-all duration-200"
           />
           <Button
             onClick={handleSend}
             disabled={!input.trim() || isLoading}
             size="sm"
-            className="self-end"
+            className="self-end bg-blue-600 hover:bg-blue-500 text-white rounded-xl focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900 transition-colors duration-200 disabled:opacity-50"
           >
             {isLoading ? (
               <span className="flex items-center gap-1">
-                <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                Thinking
+                <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Sending
               </span>
             ) : (
               "Send"
@@ -371,25 +375,51 @@ function PaymentMessageBubble({ message }: { message: { id: string; role: string
   const toolParts = parts.filter((p) => p.type === "tool-invocation");
 
   return (
-    <div className={`flex gap-2 items-start ${isUser ? "flex-row-reverse" : ""}`}>
+    <div className={`flex gap-2.5 items-start ${isUser ? "flex-row-reverse" : ""}`}>
       <div
-        className={`w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-medium ${
-          isUser ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+        className={`w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold tracking-wide ${
+          isUser
+            ? "bg-blue-600 text-white"
+            : "bg-slate-800 border border-slate-700 text-slate-300"
         }`}
       >
         {isUser ? "You" : "AI"}
       </div>
 
-      <div className={`max-w-[80%] space-y-1 ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`max-w-[82%] space-y-1.5 ${isUser ? "items-end" : "items-start"}`}>
         {textContent && (
           <div
-            className={`rounded-xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap ${
+            className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
               isUser
-                ? "bg-primary text-primary-foreground ml-auto"
-                : "bg-muted text-foreground"
+                ? "bg-blue-600 text-white ml-auto rounded-tr-sm"
+                : "bg-slate-800 border border-slate-700 text-slate-100 rounded-tl-sm"
             }`}
           >
-            {textContent}
+            {!isUser ? (
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  p: ({ children }) => <p className="mb-1.5 last:mb-0">{children}</p>,
+                  ul: ({ children }) => <ul className="list-disc list-inside space-y-0.5 mb-1.5">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal list-inside space-y-0.5 mb-1.5">{children}</ol>,
+                  li: ({ children }) => <li className="text-slate-200">{children}</li>,
+                  strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                  code: ({ children, className }) => {
+                    const isBlock = className?.includes("language-");
+                    return isBlock
+                      ? <code className="block bg-slate-950 rounded-lg p-4 text-xs font-mono text-slate-300 overflow-x-auto my-2">{children}</code>
+                      : <code className="bg-slate-950 rounded px-1.5 py-0.5 text-xs font-mono text-blue-300">{children}</code>;
+                  },
+                  table: ({ children }) => <table className="text-xs border-collapse w-full my-2">{children}</table>,
+                  th: ({ children }) => <th className="border border-slate-600 px-2 py-1 text-left font-semibold bg-slate-900">{children}</th>,
+                  td: ({ children }) => <td className="border border-slate-700 px-2 py-1">{children}</td>,
+                }}
+              >
+                {textContent}
+              </ReactMarkdown>
+            ) : (
+              textContent
+            )}
           </div>
         )}
 

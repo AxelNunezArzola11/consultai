@@ -15,10 +15,11 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { BRIEF_LIMITS } from "@/lib/brief/schema";
 import type { BriefPlan } from "@/lib/brief/schema";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 
 // ---------------------------------------------------------------------------
@@ -263,14 +264,14 @@ export function ChatPanel({
   const isLoading = status === "streaming" || status === "submitted";
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full rounded-2xl overflow-hidden border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50">
       {/* Inline error banner */}
       {inlineError && (
-        <div className="mx-3 mt-2 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+        <div className="mx-3 mt-2 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
           <span className="flex-1">⚠️ {inlineError}</span>
           <button
             onClick={() => setInlineError(null)}
-            className="shrink-0 font-medium underline underline-offset-2 hover:no-underline"
+            className="shrink-0 font-medium underline underline-offset-2 hover:no-underline transition-colors"
           >
             Dismiss
           </button>
@@ -278,12 +279,12 @@ export function ChatPanel({
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
         {messages.length === 0 && !isLoading && (
-          <div className="text-center text-muted-foreground text-sm py-12">
+          <div className="text-center text-slate-400 text-sm py-12">
             <div className="text-2xl mb-2">✍️</div>
-            <p className="font-medium">Describe your project</p>
-            <p className="text-xs mt-1 max-w-xs mx-auto">
+            <p className="font-medium text-slate-100">Describe your project</p>
+            <p className="text-xs mt-1 max-w-xs mx-auto text-slate-400">
               Tell the AI what you want to build, your timeline, and budget.
               It will create a structured plan with milestones.
             </p>
@@ -303,7 +304,6 @@ export function ChatPanel({
           const isAI = msg.role === "assistant";
 
           // Detect a JSON fence in this message regardless of streaming state.
-          // This is used to hide the raw JSON block even while it is still streaming.
           const hasFence = isAI && messageHasJsonFence(textContent);
 
           // Only attempt to parse + show the Approve button once streaming is done.
@@ -311,18 +311,11 @@ export function ChatPanel({
             ? extractPlanFromMessage(textContent)
             : null;
 
-          // Build the visible text:
-          //   - If a complete parseable plan exists: strip the entire ```json…``` block.
-          //   - If the fence exists but JSON isn't parseable yet (still streaming or truncated):
-          //     strip everything from ```json onward so raw JSON is never visible.
-          //   - Otherwise: show full text.
           const displayText = (() => {
             if (plan) {
-              // Complete plan parsed — strip the fence block, keep surrounding text
               return textContent.replace(/```json[\s\S]*?```/g, "").trim();
             }
             if (hasFence) {
-              // Fence opened but not yet closed (streaming) — hide from ```json onward
               return textContent.replace(/```json[\s\S]*/g, "").trim();
             }
             return textContent;
@@ -331,34 +324,60 @@ export function ChatPanel({
           const alreadySaved = savedMessageIds.has(msg.id);
 
           return (
-            <div key={msg.id} className={`flex gap-2 items-start ${isUser ? "flex-row-reverse" : ""}`}>
+            <div key={msg.id} className={`flex gap-2.5 items-start ${isUser ? "flex-row-reverse" : ""}`}>
               {/* Avatar */}
-              <div className={`w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-medium ${
-                isUser ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+              <div className={`w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold tracking-wide ${
+                isUser
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-800 border border-slate-700 text-slate-300"
               }`}>
                 {isUser ? "You" : "AI"}
               </div>
 
-              <div className={`max-w-[80%] space-y-1 ${isUser ? "items-end" : "items-start"}`}>
+              <div className={`max-w-[82%] space-y-1.5 ${isUser ? "items-end" : "items-start"}`}>
                 {displayText && (
-                  <div className={`rounded-xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap ${
+                  <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                     isUser
-                      ? "bg-primary text-primary-foreground ml-auto"
-                      : "bg-muted text-foreground"
+                      ? "bg-blue-600 text-white ml-auto rounded-tr-sm"
+                      : "bg-slate-800 border border-slate-700 text-slate-100 rounded-tl-sm"
                   }`}>
-                    {displayText}
+                    {isAI ? (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          p: ({ children }) => <p className="mb-1.5 last:mb-0">{children}</p>,
+                          ul: ({ children }) => <ul className="list-disc list-inside space-y-0.5 mb-1.5">{children}</ul>,
+                          ol: ({ children }) => <ol className="list-decimal list-inside space-y-0.5 mb-1.5">{children}</ol>,
+                          li: ({ children }) => <li className="text-slate-200">{children}</li>,
+                          strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                          code: ({ children, className }) => {
+                            const isBlock = className?.includes("language-");
+                            return isBlock
+                              ? <code className="block bg-slate-950 rounded-lg p-4 text-xs font-mono text-slate-300 overflow-x-auto my-2">{children}</code>
+                              : <code className="bg-slate-950 rounded px-1.5 py-0.5 text-xs font-mono text-blue-300">{children}</code>;
+                          },
+                          table: ({ children }) => <table className="text-xs border-collapse w-full my-2">{children}</table>,
+                          th: ({ children }) => <th className="border border-slate-600 px-2 py-1 text-left font-semibold bg-slate-900">{children}</th>,
+                          td: ({ children }) => <td className="border border-slate-700 px-2 py-1">{children}</td>,
+                        }}
+                      >
+                        {displayText}
+                      </ReactMarkdown>
+                    ) : (
+                      displayText
+                    )}
                   </div>
                 )}
 
-                {/* While the JSON fence is streaming: show a subtle "Generating plan…" indicator */}
+                {/* While the JSON fence is streaming: show "Generating plan…" indicator */}
                 {hasFence && !plan && (status === "streaming" || status === "submitted") && (
-                  <div className="rounded-xl px-3 py-2 text-xs text-muted-foreground bg-muted/50 flex items-center gap-2">
-                    <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                  <div className="rounded-2xl px-4 py-2.5 text-xs text-slate-400 bg-slate-800 border border-slate-700 flex items-center gap-2">
+                    <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
                     Generating plan…
                   </div>
                 )}
 
-                {/* Approve button — only on AI messages with a parseable plan */}
+                {/* Approve button */}
                 {plan && !alreadySaved && (
                   <ApprovePlanButton
                     plan={plan}
@@ -378,9 +397,9 @@ export function ChatPanel({
                   />
                 )}
 
-                {/* Already-saved badge (persists after approval) */}
+                {/* Already-saved badge */}
                 {plan && alreadySaved && (
-                  <Badge className="text-xs bg-emerald-600 hover:bg-emerald-700 mt-1">
+                  <Badge className="text-xs bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 mt-1">
                     ✅ Plan saved — {plan.milestones.length} milestones
                   </Badge>
                 )}
@@ -389,14 +408,17 @@ export function ChatPanel({
           );
         })}
 
+        {/* Thinking indicator — 3 pulsing dots */}
         {isLoading && (
-          <div className="flex gap-2 items-start">
-            <div className="w-6 h-6 rounded-full bg-primary/10 flex-shrink-0 flex items-center justify-center text-xs">
+          <div className="flex gap-2.5 items-start">
+            <div className="w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-slate-300">
               AI
             </div>
-            <div className="space-y-1.5 flex-1">
-              <Skeleton className="h-3 w-3/4" />
-              <Skeleton className="h-3 w-1/2" />
+            <div className="rounded-2xl rounded-tl-sm bg-slate-800 border border-slate-700 px-4 py-3 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" style={{ animationDelay: "0ms" }} />
+              <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" style={{ animationDelay: "150ms" }} />
+              <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" style={{ animationDelay: "300ms" }} />
+              <span className="ml-1.5 text-xs text-slate-400">thinking…</span>
             </div>
           </div>
         )}
@@ -405,9 +427,9 @@ export function ChatPanel({
       </div>
 
       {/* Input */}
-      <div className="border-t p-3 space-y-2 bg-background">
+      <div className="border-t border-slate-800 p-3 space-y-2 bg-slate-900/80 backdrop-blur-sm">
         {charCount > BRIEF_LIMITS.INPUT_MAX_CHARS * 0.9 && (
-          <p className="text-xs text-amber-600 dark:text-amber-400">
+          <p className="text-xs text-amber-400">
             {charCount}/{BRIEF_LIMITS.INPUT_MAX_CHARS} characters
           </p>
         )}
@@ -423,18 +445,18 @@ export function ChatPanel({
             placeholder="Describe your project…"
             rows={3}
             disabled={isLoading}
-            className="flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 transition-opacity"
+            className="flex-1 resize-none rounded-xl border border-slate-700 bg-slate-800 text-slate-100 placeholder:text-slate-500 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 focus:border-transparent disabled:opacity-50 transition-all duration-200"
           />
           <Button
             onClick={handleSend}
             disabled={!input.trim() || isLoading}
             size="sm"
-            className="self-end"
+            className="self-end bg-blue-600 hover:bg-blue-500 text-white rounded-xl focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900 transition-colors duration-200 disabled:opacity-50"
           >
             {isLoading ? (
               <span className="flex items-center gap-1">
-                <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                Thinking
+                <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Sending
               </span>
             ) : (
               "Send"

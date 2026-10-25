@@ -41,6 +41,8 @@
     "pdf-lib": "^1.17.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
     "shadcn": "^4.21.4",
     "sonner": "^2.0.8",
     "tsx": "^4.23.15",

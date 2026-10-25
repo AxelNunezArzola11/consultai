@@ -23,25 +23,25 @@ export default async function DashboardPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-foreground tracking-tight">Dashboard</h1>
-          <p className="text-muted-foreground text-sm mt-0.5">
+          <h1 className="text-xl font-bold text-slate-100 tracking-tight">Dashboard</h1>
+          <p className="text-slate-400 text-sm mt-0.5">
             Your active projects and milestones
           </p>
         </div>
         <Link
           href="/project/new"
-          className="inline-flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold px-3 py-2 hover:bg-primary/90 active:scale-[0.97] transition-all shadow-sm shadow-primary/20"
+          className="inline-flex items-center gap-1.5 rounded-2xl bg-blue-600 text-white text-xs font-semibold px-4 py-2.5 hover:bg-blue-500 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 transition-all duration-200 shadow-lg shadow-blue-600/20"
         >
           <span className="text-sm leading-none">+</span> New project
         </Link>
       </div>
 
       {projectList.length === 0 ? (
-        <Card className="border-border bg-card">
-          <CardContent className="py-16 text-center text-muted-foreground">
+        <Card className="border-slate-800 bg-slate-900 rounded-2xl">
+          <CardContent className="py-16 text-center text-slate-400">
             <div className="text-4xl mb-3 opacity-20">◈</div>
             <p className="text-sm">No projects yet. Run{" "}
-              <code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono">npm run seed</code>{" "}
+              <code className="bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded text-xs font-mono">npm run seed</code>{" "}
               to load demo data.
             </p>
           </CardContent>
@@ -104,9 +104,9 @@ async function ProjectCard({
   const paidCount = milestoneList.filter((m) => m.status === "paid").length;
 
   return (
-    <Card className="border-border bg-card shadow-md hover:shadow-lg transition-all overflow-hidden">
+    <Card className="border-slate-800 bg-slate-900 rounded-2xl shadow-xl shadow-black/30 hover:shadow-2xl hover:shadow-black/40 hover:border-slate-700 transition-all duration-200 overflow-hidden">
       {/* Top accent line */}
-      <div className="h-0.5 bg-primary/60 inset-x-0 top-0" />
+      <div className="h-0.5 bg-blue-600/70" />
 
       <CardHeader className="pb-3 pt-4">
         <div className="flex items-start justify-between gap-3">
@@ -114,13 +114,13 @@ async function ProjectCard({
             <CardTitle className="text-base">
               <Link
                 href={`/project/${project.id}/milestones`}
-                className="text-foreground hover:text-primary transition-colors font-semibold"
+                className="text-slate-100 hover:text-blue-400 transition-colors duration-200 font-semibold"
               >
                 {project.title}
               </Link>
             </CardTitle>
             {project.rawBrief && (
-              <p className="text-xs text-muted-foreground line-clamp-2 mt-1 leading-relaxed">
+              <p className="text-xs text-slate-400 line-clamp-2 mt-1 leading-relaxed">
                 {project.rawBrief}
               </p>
             )}
@@ -135,16 +135,16 @@ async function ProjectCard({
         </div>
 
         {/* Stats strip */}
-        <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-4 mt-2 text-xs text-slate-400">
           <span>
-            <strong className="text-foreground tabular-nums">{milestoneList.length}</strong> milestones
+            <strong className="text-slate-100 tabular-nums">{milestoneList.length}</strong> milestones
           </span>
           <span>
             <strong className="text-emerald-400 tabular-nums">{paidCount}</strong> paid
           </span>
           {totalBudget > 0 && (
             <span>
-              <strong className="text-foreground tabular-nums">${totalBudget.toLocaleString()}</strong> total
+              <strong className="text-slate-100 tabular-nums">${totalBudget.toLocaleString()}</strong> total
             </span>
           )}
         </div>
@@ -155,7 +155,7 @@ async function ProjectCard({
             <Link
               key={segment}
               href={`/project/${project.id}/${segment}`}
-              className="text-[11px] font-medium text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/70 border border-border hover:border-border px-2.5 py-1 rounded-md transition-all"
+              className="text-[11px] font-medium text-slate-400 hover:text-slate-100 bg-slate-800/70 hover:bg-slate-800 border border-slate-700/60 hover:border-slate-600 px-2.5 py-1 rounded-full transition-all duration-200"
             >
               {label}
             </Link>
@@ -165,17 +165,17 @@ async function ProjectCard({
 
       <CardContent className="pt-0">
         {milestoneList.length === 0 ? (
-          <p className="text-xs text-muted-foreground py-2">No milestones yet.</p>
+          <p className="text-xs text-slate-400 py-2">No milestones yet.</p>
         ) : (
           <div className="space-y-1">
             {milestoneList.map((m) => (
               <div
                 key={m.id}
-                className="flex items-center justify-between text-xs rounded-lg px-3 py-2 bg-muted/20 border border-border/50 hover:bg-muted/40 transition-colors"
+                className="flex items-center justify-between text-xs rounded-xl px-3 py-2 bg-slate-800/50 border border-slate-700/50 hover:bg-slate-800 hover:border-slate-600 transition-all duration-200"
               >
-                <span className="font-medium text-foreground/90 truncate mr-3">{m.title}</span>
+                <span className="font-medium text-slate-200 truncate mr-3">{m.title}</span>
                 <div className="flex items-center gap-3 shrink-0">
-                  <span className="text-muted-foreground tabular-nums">
+                  <span className="text-slate-400 tabular-nums">
                     ${Number(m.budgetUsd).toLocaleString()}
                   </span>
                   <StatusPill status={m.status} />
