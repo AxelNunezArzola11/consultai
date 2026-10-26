@@ -318,7 +318,14 @@ export default function BryntumGantt({
   return (
     <div
       className={className}
-      style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}
+      style={{
+        width: "100%",
+        height: "100%",
+        minWidth: 0,
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+      }}
       onDragOver={(event) => {
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
@@ -379,7 +386,7 @@ export default function BryntumGantt({
       )}
 
       {/* ── Bryntum Gantt widget ─────────────────────────────────────────────── */}
-      <div style={{ flex: 1, minHeight: "100%", height: "100%", minWidth: 0 }}>
+      <div style={{ flex: 1, minHeight: 0, height: "100%", minWidth: 0, overflow: "hidden" }}>
         <BryntumGanttWidget
           ref={ganttRef}
 

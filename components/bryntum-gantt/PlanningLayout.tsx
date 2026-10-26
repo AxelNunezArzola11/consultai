@@ -11,7 +11,7 @@
  *   1. The Bryntum DragHelper listens for mousedown on `.ag-row` elements
  *      inside the AG Grid panel.
  *   2. It clones the row as a drag proxy and tracks mouse movement.
- *   3. `dropTargetSelector: ".b-sch-canvas"` marks the Gantt timeline as
+ *   3. `dropTargetSelector` marks the Gantt timeline subgrid as
  *      the valid drop zone.
  *   4. On drop, the grabbed row element's data-id is used to look up the
  *      task from the unscheduled list.  The task is injected into Bryntum's
@@ -157,8 +157,9 @@ export default function PlanningLayout({
         // Target AG Grid rendered rows as the draggable elements.
         targetSelector: ".ag-row",
 
-        // Only allow dropping onto the Bryntum Gantt schedule canvas.
-        dropTargetSelector: ".b-sch-canvas",
+        // Match the timeline subgrid and its time-axis cells, not only the
+        // canvas layer. The latter does not cover every valid hover target.
+        dropTargetSelector: ".b-timeline-subgrid, .b-grid-subgrid-timeaxis, .b-sch-timeaxis-cell",
 
         // Clone the row as a visual proxy; keep the original row in the grid.
         cloneTarget:          true,
@@ -167,21 +168,6 @@ export default function PlanningLayout({
         hideOriginalElement:  false,
 
         listeners: {
-          /**
-           * Fires while dragging — mark drop valid only when over the canvas.
-           */
-          drag({
-            context,
-          }: {
-            context: {
-              target: HTMLElement | null;
-              valid:  boolean;
-            };
-          }) {
-            const overCanvas = context.target?.closest(".b-sch-canvas") != null;
-            context.valid = overCanvas;
-          },
-
           /**
            * Fires on drop — inject task into Bryntum and remove from AG Grid.
            * NOTE: Bryntum's DragHelperListeners "drop" type does NOT include
@@ -291,7 +277,7 @@ export default function PlanningLayout({
   return (
     <div
       ref={splitRef}
-      className="flex min-h-[calc(100vh-80px)] w-full flex-row overflow-hidden bg-slate-950"
+      className="flex min-h-[calc(100vh-80px)] min-w-0 w-full flex-row overflow-hidden bg-slate-950"
     >
       {/* ── Left panel: Unscheduled Tasks (AG Grid) ───────────────────────── */}
       <div
@@ -309,7 +295,8 @@ export default function PlanningLayout({
       <div
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50"
       >
-        <BryntumGanttDynamic
+        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <BryntumGanttDynamic
           // Thread the ref through via a callback ref pattern: BryntumGantt
           // exposes no forwardRef, so we read ganttRef from the rendered
           // widget's instance inside the drop handler instead.
@@ -324,8 +311,9 @@ export default function PlanningLayout({
           onAiMessage={handleAiMessage}
           // Pass our ganttRef down so the DragHelper can call into the store.
           // BryntumGantt accepts an optional ganttRef prop (added below).
-          ganttRef={ganttRef}
-        />
+            ganttRef={ganttRef}
+          />
+        </div>
       </div>
     </div>
   );

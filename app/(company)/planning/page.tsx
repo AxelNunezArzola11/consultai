@@ -87,7 +87,7 @@ export default async function PlanningPage() {
   // ── 4. Render ──────────────────────────────────────────────────────────────
   // Only plain serialisable props cross the server → client boundary.
   return (
-    <div className="flex min-h-[calc(100vh-80px)] flex-1 overflow-hidden bg-slate-950">
+    <div className="flex min-h-[calc(100vh-80px)] min-w-0 flex-1 overflow-hidden bg-slate-950">
       <PlanningLayout {...layoutProps} />
     </div>
   );
