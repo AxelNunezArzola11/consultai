@@ -29,6 +29,7 @@
 // Dark theme — import exactly ONE Bryntum theme per page.
 // Remove this import and add it to globals.css if another Bryntum component
 // is already imported in the same page tree.
+import "@bryntum/gantt/gantt.css";
 import "@bryntum/gantt/stockholm-dark.css";
 
 // ─── React ────────────────────────────────────────────────────────────────────
@@ -231,44 +232,47 @@ export default function BryntumGantt({
   //   <BryntumChatPanel onLocalMessage={handleCopilotMessage} ... />
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
 
-  const addTask = useCallback((taskData: Partial<GanttTask>) => {
+  const addTask = (taskData: Partial<GanttTask>) => {
     const project = (ganttRef.current?.instance as unknown as { project: ProjectModel } | undefined)?.project;
     if (!project) return;
     const store = project.taskStore;
-    store.add({
-      name:      taskData.name ?? "New task",
-      startDate: taskData.startDate ?? new Date().toISOString().slice(0, 10),
-      duration:  taskData.duration ?? 1,
+    // Build a new plain object from the public task fields. In particular, do
+    // not pass an AG Grid row, DOM element, or Bryntum model to Store#add.
+    const taskRecord: TaskModelConfig = {
+      id:          taskData.id,
+      name:        taskData.name ?? "New task",
+      startDate:   taskData.startDate ?? new Date().toISOString().slice(0, 10),
+      duration:    taskData.duration ?? 1,
       percentDone: taskData.percentDone ?? 0,
-      ...taskData,
-    });
-  }, [ganttRef]);
+      parentId:    taskData.parentId ?? null,
+    };
 
-  const handleGanttDrop = useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
+    // The store is responsible for constructing the TaskModel.
+    store.add(taskRecord);
+  };
 
-      const rawPayload = event.dataTransfer.getData("application/json");
-      if (!rawPayload) return;
+  const handleGanttDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
 
-      try {
-        const payload = JSON.parse(rawPayload) as Record<string, unknown>;
-        const targetDate =
-          ganttRef.current?.instance?.getDateFromCoordinate?.(
-            event.clientX,
-            "floor",
-            false,
-            true
-          ) ?? new Date();
+    const rawPayload = event.dataTransfer.getData("application/json");
+    if (!rawPayload) return;
 
-        onExternalDrop?.(payload, targetDate);
-      } catch {
-        // ignore malformed payloads from unrelated drag sources
-      }
-    },
-    [ganttRef, onExternalDrop]
-  );
+    try {
+      const payload = JSON.parse(rawPayload) as Record<string, unknown>;
+      const targetDate =
+        ganttRef.current?.instance?.getDateFromCoordinate?.(
+          event.clientX,
+          "floor",
+          false,
+          true
+        ) ?? new Date();
+
+      onExternalDrop?.(payload, targetDate);
+    } catch {
+      // Ignore malformed payloads from unrelated drag sources.
+    }
+  };
 
   // ── Task change handler ──────────────────────────────────────────────────────
   // Use the official Bryntum onDataChange event signature.
@@ -283,7 +287,8 @@ export default function BryntumGantt({
     }) => {
       // Cast record to access its .data property (Bryntum Model stores field
       // values in a typed `data` bag at runtime).
-      const data = (event.record as unknown as { data: GanttTask }).data;
+      const record = event?.record ?? event?.records?.[0];
+      const data = (record as unknown as { data?: GanttTask } | undefined)?.data;
       if (data) onTaskChange?.(data);
     },
     [onTaskChange]
@@ -420,7 +425,7 @@ export default function BryntumGantt({
       )}
 
       {/* ── Bryntum Gantt widget ─────────────────────────────────────────────── */}
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div style={{ flex: 1, minHeight: "100%", height: "100%", minWidth: 0 }}>
         <BryntumGanttWidget
           ref={ganttRef}
 

@@ -124,14 +124,15 @@ export default function PlanningLayout({
       return false;
     }
 
-    const normalizedTask = {
+    // Copy only serializable task fields from the AG Grid row. Never pass the
+    // row element, row node, or AG Grid data object through to Bryntum.
+    const normalizedTask: GanttTask = {
       id: taskData.id ?? nextDropId(),
       name: taskData.name ?? "Dropped task",
       startDate: taskData.startDate ?? new Date().toISOString().slice(0, 10),
       duration: taskData.duration ?? 1,
       percentDone: taskData.percentDone ?? 0,
       parentId: taskData.parentId ?? null,
-      ...taskData,
     };
 
     project.taskStore.add(normalizedTask);
@@ -306,7 +307,7 @@ export default function PlanningLayout({
 
       {/* ── Right panel: Bryntum Gantt timeline ──────────────────────────── */}
       <div
-        className="min-w-0 flex-1 overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50"
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50"
       >
         <BryntumGanttDynamic
           // Thread the ref through via a callback ref pattern: BryntumGantt
