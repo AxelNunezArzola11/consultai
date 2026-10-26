@@ -139,6 +139,28 @@ export default function PlanningLayout({
     return true;
   }, []);
 
+  const scheduleTask = useCallback((taskId: string | number, targetStartDate: string): boolean => {
+    const task = unscheduledRef.current.find((candidate) => String(candidate.id) === String(taskId));
+    if (!task) {
+      console.error("[Planning] Cannot schedule task: AI task ID is not in the unscheduled list.");
+      return false;
+    }
+
+    const inserted = addTask({
+      id: task.id,
+      name: task.name,
+      startDate: targetStartDate,
+      duration: Number(task.estimatedDays) || 1,
+      percentDone: 0,
+    });
+    if (inserted) {
+      setUnscheduledTasks((current) =>
+        current.filter((candidate) => String(candidate.id) !== String(task.id))
+      );
+    }
+    return inserted;
+  }, [addTask]);
+
   // ── Set up the Bryntum DragHelper after the DOM is ready ──────────────────
   useEffect(() => {
     if (!splitRef.current) return;
@@ -159,7 +181,7 @@ export default function PlanningLayout({
 
         // Accept the whole Gantt panel. Bryntum's internal subgrid classes
         // vary between views, so do not limit drops to the canvas layer.
-        dropTargetSelector: ".gantt-drop-zone, .b-gantt, .b-grid-body",
+        dropTargetSelector: ".gantt-drop-zone, .b-gantt, .b-gridbase",
 
         // Clone the row as a visual proxy; keep the original row in the grid.
         cloneTarget:          true,
@@ -181,10 +203,9 @@ export default function PlanningLayout({
               valid: boolean;
             };
           }) {
-            const overGantt = context.target?.closest(
-              ".gantt-drop-zone, .b-gantt, .b-grid-body"
+            context.valid = Boolean(
+              context.target?.closest(".gantt-drop-zone, .b-gantt, .b-gridbase")
             );
-            context.valid = Boolean(overGantt);
           },
 
           /**
@@ -203,7 +224,7 @@ export default function PlanningLayout({
               valid:   boolean;
             };
           }) {
-            if (!context.valid) return;
+            if (!context.target?.closest(".gantt-drop-zone, .b-gantt, .b-gridbase")) return;
 
             // 1. Resolve which task was dragged using the row's data-row-id.
             //    AG Grid 32 sets `row-id` on the .ag-row element via getRowId().
@@ -247,17 +268,7 @@ export default function PlanningLayout({
               ? targetDate.toISOString().slice(0, 10)
               : new Date().toISOString().slice(0, 10);
 
-            const inserted = addTask({
-              id: task.id,
-              name: task.name,
-              startDate,
-              duration: Number(task.estimatedDays) || 1,
-              percentDone: 0,
-            });
-
-            if (inserted) {
-              setUnscheduledTasks((prev) => prev.filter((t) => String(t.id) !== String(task.id)));
-            }
+            scheduleTask(task.id, startDate);
           },
         },
       });
@@ -267,23 +278,44 @@ export default function PlanningLayout({
       disposed = true;
       dragHelper?.destroy();
     };
-    // addTask is stable (useCallback with no deps); run only on mount.
+    // DragHelper is created once; refs keep its task and Gantt state current.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Stable onExternalDrop for BryntumGantt (kept for backwards-compat) ─────
-  const handleExternalDrop = useCallback(
-    (payload: unknown, date: Date) => {
-      console.debug("[Gantt] external drop:", payload, "at", date);
-    },
-    []
-  );
+  const handleExternalDrop = useCallback((payload: unknown, date: Date) => {
+    console.debug("[Gantt] external drop:", payload, "at", date);
+  }, []);
 
   // ── AI copilot stub ────────────────────────────────────────────────────────
   const handleAiMessage = useCallback(async (message: string): Promise<string> => {
-    console.debug("[Gantt AI Copilot]", message);
-    return `🤖 AI stub — wire to /api/gantt/ai. Received: "${message}"`;
-  }, []);
+    const response = await fetch("/api/ai/planning", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        availableTasks: unscheduledRef.current.map(({ id, name }) => ({ id, name })),
+      }),
+    });
+    const result = (await response.json()) as {
+      text?: string;
+      error?: string;
+      toolCalls?: Array<{
+        toolName: string;
+        input: { taskId: string | number; targetStartDate: string };
+      }>;
+    };
+    if (!response.ok) throw new Error(result.error ?? "The planning AI request failed.");
+
+    const scheduled: string[] = [];
+    for (const call of result.toolCalls ?? []) {
+      if (call.toolName !== "scheduleTask") continue;
+      if (scheduleTask(call.input.taskId, call.input.targetStartDate)) {
+        scheduled.push(`Scheduled task \`${call.input.taskId}\` for ${call.input.targetStartDate}.`);
+      }
+    }
+    return [result.text, ...scheduled].filter(Boolean).join("\n\n") || "I could not produce a planning response.";
+  }, [scheduleTask]);
 
   // ── Task change handler ────────────────────────────────────────────────────
   const handleTaskChange = useCallback((task: GanttTask) => {
