@@ -11,7 +11,7 @@
  *   1. The Bryntum DragHelper listens for mousedown on `.ag-row` elements
  *      inside the AG Grid panel.
  *   2. It clones the row as a drag proxy and tracks mouse movement.
- *   3. `dropTargetSelector` marks the Gantt timeline subgrid as
+ *   3. `dropTargetSelector` marks the whole Gantt panel as
  *      the valid drop zone.
  *   4. On drop, the grabbed row element's data-id is used to look up the
  *      task from the unscheduled list.  The task is injected into Bryntum's
@@ -157,9 +157,9 @@ export default function PlanningLayout({
         // Target AG Grid rendered rows as the draggable elements.
         targetSelector: ".ag-row",
 
-        // Match the timeline subgrid and its time-axis cells, not only the
-        // canvas layer. The latter does not cover every valid hover target.
-        dropTargetSelector: ".b-timeline-subgrid, .b-grid-subgrid-timeaxis, .b-sch-timeaxis-cell",
+        // Accept the whole Gantt panel. Bryntum's internal subgrid classes
+        // vary between views, so do not limit drops to the canvas layer.
+        dropTargetSelector: ".gantt-drop-zone, .b-gantt, .b-grid-body",
 
         // Clone the row as a visual proxy; keep the original row in the grid.
         cloneTarget:          true,
@@ -168,6 +168,25 @@ export default function PlanningLayout({
         hideOriginalElement:  false,
 
         listeners: {
+          /**
+           * Keep the drop indicator enabled anywhere inside the right-hand
+           * Gantt panel. This deliberately does not validate task data here;
+           * the drop handler performs the safe row lookup before insertion.
+           */
+          drag({
+            context,
+          }: {
+            context: {
+              target: HTMLElement | null;
+              valid: boolean;
+            };
+          }) {
+            const overGantt = context.target?.closest(
+              ".gantt-drop-zone, .b-gantt, .b-grid-body"
+            );
+            context.valid = Boolean(overGantt);
+          },
+
           /**
            * Fires on drop — inject task into Bryntum and remove from AG Grid.
            * NOTE: Bryntum's DragHelperListeners "drop" type does NOT include
@@ -293,24 +312,24 @@ export default function PlanningLayout({
 
       {/* ── Right panel: Bryntum Gantt timeline ──────────────────────────── */}
       <div
-        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50"
+        className="gantt-drop-zone flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50"
       >
         <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
           <BryntumGanttDynamic
-          // Thread the ref through via a callback ref pattern: BryntumGantt
-          // exposes no forwardRef, so we read ganttRef from the rendered
-          // widget's instance inside the drop handler instead.
-          tasks={initialTasks && initialTasks.length > 0 ? initialTasks : undefined}
-          dependencies={
-            initialDependencies && initialDependencies.length > 0
-              ? initialDependencies
-              : undefined
-          }
-          onTaskChange={handleTaskChange}
-          onExternalDrop={handleExternalDrop}
-          onAiMessage={handleAiMessage}
-          // Pass our ganttRef down so the DragHelper can call into the store.
-          // BryntumGantt accepts an optional ganttRef prop (added below).
+            // Thread the ref through via a callback ref pattern: BryntumGantt
+            // exposes no forwardRef, so we read ganttRef from the rendered
+            // widget's instance inside the drop handler instead.
+            tasks={initialTasks && initialTasks.length > 0 ? initialTasks : undefined}
+            dependencies={
+              initialDependencies && initialDependencies.length > 0
+                ? initialDependencies
+                : undefined
+            }
+            onTaskChange={handleTaskChange}
+            onExternalDrop={handleExternalDrop}
+            onAiMessage={handleAiMessage}
+            // Pass our ganttRef down so the DragHelper can call into the store.
+            // BryntumGantt accepts an optional ganttRef prop (added below).
             ganttRef={ganttRef}
           />
         </div>
