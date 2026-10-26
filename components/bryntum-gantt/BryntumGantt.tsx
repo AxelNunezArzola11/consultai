@@ -38,6 +38,7 @@ import React, { useRef, useCallback, useState, type RefObject } from "react";
 // ─── Bryntum React wrappers ───────────────────────────────────────────────────
 import { BryntumGantt as BryntumGanttWidget } from "@bryntum/gantt-react";
 import type { BryntumGantt as BryntumGanttClass } from "@bryntum/gantt-react";
+import GanttChatPanel from "@/components/bryntum-gantt/GanttChatPanel";
 
 // ─── Bryntum core types ───────────────────────────────────────────────────────
 import type {
@@ -225,11 +226,6 @@ export default function BryntumGantt({
   const ganttRef = externalGanttRef ?? internalGanttRef;
 
   // ── AI Copilot state ────────────────────────────────────────────────────────
-  // [ AI COPILOT PLACEHOLDER ]
-  // Replace this local state with a BryntumChatPanel wired to onAiMessage.
-  // Example:
-  //   import { BryntumChatPanel } from "@bryntum/gantt-react";
-  //   <BryntumChatPanel onLocalMessage={handleCopilotMessage} ... />
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
 
   const addTask = (taskData: Partial<GanttTask>) => {
@@ -354,7 +350,6 @@ export default function BryntumGantt({
 
         <span style={{ flex: 1 }} />
 
-        {/* [ AI COPILOT PLACEHOLDER ] — Replace with <BryntumChatPanel> toggle */}
         <ToolbarButton
           label={aiPanelOpen ? "✕ Close AI" : "✦ AI Copilot"}
           title="Toggle AI scheduling assistant"
@@ -379,49 +374,8 @@ export default function BryntumGantt({
         />
       </div>
 
-      {/* ── AI Copilot panel placeholder ─────────────────────────────────────── */}
-      {/* [ AI COPILOT PLACEHOLDER ]
-          Replace this <div> with:
-            <BryntumChatPanel
-              intro="Ask me to reschedule, add milestones, or adjust dependencies."
-              examplePrompts={[
-                'Move QA to next week',
-                'Add a milestone for client review',
-                'Show the critical path',
-                'Delay Release by 3 days',
-              ]}
-              onLocalMessage={async ({ source: panel, text }) => {
-                if (!onAiMessage) return;
-                const reply = await onAiMessage(text);
-                panel.addMessage({ role: 'assistant', text: reply });
-              }}
-              hidden={!aiPanelOpen}
-              style={{ height: 320 }}
-            />
-      */}
       {aiPanelOpen && (
-        <div
-          style={{
-            background:   "#0f1117",
-            borderBottom: "1px solid #1e293b",
-            padding:      "16px 20px",
-            color:        "#94a3b8",
-            fontSize:     13,
-            flexShrink:   0,
-          }}
-        >
-          <p style={{ margin: 0, fontWeight: 600, color: "#e2e8f0", marginBottom: 6 }}>
-            ✦ AI Copilot — Scheduling Assistant
-          </p>
-          <p style={{ margin: 0, opacity: 0.7 }}>
-            Replace this placeholder with{" "}
-            <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: 4 }}>
-              &lt;BryntumChatPanel&gt;
-            </code>{" "}
-            wired to <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: 4 }}>onAiMessage</code>.
-            The Bryntum scheduling engine will propagate dependency changes automatically.
-          </p>
-        </div>
+        <GanttChatPanel onAiMessage={onAiMessage} />
       )}
 
       {/* ── Bryntum Gantt widget ─────────────────────────────────────────────── */}
@@ -450,6 +404,7 @@ export default function BryntumGantt({
           // Enables the Bryntum scheduling engine so that moving one task
           // automatically propagates lag-aware delays to dependents.
           enableTransactionalFeatures={true}
+          detectCSSCompatibilityIssues={false}
 
           // ── Features ───────────────────────────────────────────────────────
           // Critical path highlighting — enabled by default; set to true to

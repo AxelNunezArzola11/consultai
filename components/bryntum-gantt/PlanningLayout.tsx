@@ -291,7 +291,7 @@ export default function PlanningLayout({
   return (
     <div
       ref={splitRef}
-      className="flex h-full min-h-0 w-full flex-row overflow-hidden bg-slate-950"
+      className="flex min-h-[calc(100vh-80px)] w-full flex-row overflow-hidden bg-slate-950"
     >
       {/* ── Left panel: Unscheduled Tasks (AG Grid) ───────────────────────── */}
       <div
