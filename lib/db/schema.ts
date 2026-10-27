@@ -712,6 +712,19 @@ export const verificationRuns = pgTable("verification_runs", {
     .defaultNow(),
 });
 
+export const deliveryWorkflowRuns = pgTable("delivery_workflow_runs", {
+  id: text("id").primaryKey(),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  milestoneId: text("milestone_id").notNull().references(() => milestones.id),
+  prUrl: text("pr_url").notNull(),
+  taskRunId: text("task_run_id").notNull(),
+  status: text("status").notNull().default("pending"),
+  result: jsonb("result"),
+  error: text("error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // ---------------------------------------------------------------------------
 // agent_steps
 //

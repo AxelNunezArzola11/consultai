@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "workflows:build": "tsc -p workflows/tsconfig.json",
+    "workflows:start": "tsx workflows/index.ts",
     "dev": "next dev --webpack",
     "build": "next build --webpack",
     "start": "next start",
@@ -25,6 +27,7 @@
     "@bryntum/gantt-react": "7.3.7",
     "@hello-pangea/dnd": "^18.0.1",
     "@neondatabase/serverless": "^1.2.0",
+    "@renderinc/sdk": "1.4.0",
     "ag-grid-community": "32.3.9",
     "ag-grid-react": "32.3.9",
     "ai": "^6.0.305",
