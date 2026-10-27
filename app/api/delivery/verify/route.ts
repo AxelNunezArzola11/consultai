@@ -35,7 +35,7 @@ import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 
 import { db } from "@/lib/db";
-import { milestones, verificationRuns, agentSteps, paymentProposals, projects } from "@/lib/db/schema";
+import { milestones, verificationRuns, agentSteps, paymentProposals, projects, deliveryWorkflowRuns } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/db/audit";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
@@ -60,6 +60,8 @@ import {
   getAutoReleaseLimitUsd,
   type PolicyFlag,
 } from "@/lib/delivery/policy-engine";
+import { Render } from "@renderinc/sdk";
+import { DeliveryWorkflowInputSchema } from "@/workflows/schemas";
 
 export const dynamic = "force-dynamic";
 
@@ -168,6 +170,48 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { error: (err as Error).message },
         { status: 400 }
       );
+    }
+
+    if (process.env.DELIVERY_WORKFLOW_ENABLED === "true") {
+      const idempotencyKey = `delivery:${milestoneId}:${prUrl}`;
+      const existing = await db
+        .select()
+        .from(deliveryWorkflowRuns)
+        .where(eq(deliveryWorkflowRuns.idempotencyKey, idempotencyKey))
+        .limit(1);
+      if (existing[0]) {
+        return NextResponse.json({ workflowRunId: existing[0].id, taskRunId: existing[0].taskRunId, status: existing[0].status }, { status: 202 });
+      }
+
+      const workflowInput = DeliveryWorkflowInputSchema.parse({
+        prUrl,
+        expectedAuthor,
+        criteria,
+        amountUsd: parseFloat(milestone.budgetUsd ?? "0"),
+      });
+      const render = new Render();
+      const taskRun = await render.workflows.startTask(
+        `${process.env.DELIVERY_WORKFLOW_SLUG ?? "consultai-delivery"}/verifyDelivery`,
+        [workflowInput],
+        { idempotencyKey },
+      );
+      const workflowRunId = `workflow_${nanoid(12)}`;
+      await db.insert(deliveryWorkflowRuns).values({
+        id: workflowRunId,
+        idempotencyKey,
+        milestoneId,
+        prUrl,
+        taskRunId: taskRun.taskRunId,
+        status: "pending",
+      });
+      await writeAuditLog({
+        entityType: "milestone",
+        entityId: milestoneId,
+        event: "DELIVERY_WORKFLOW_TRIGGERED",
+        actor: role,
+        payload: { workflowRunId, taskRunId: taskRun.taskRunId, idempotencyKey },
+      });
+      return NextResponse.json({ workflowRunId, taskRunId: taskRun.taskRunId, status: "pending" }, { status: 202 });
     }
 
     // Create the verification run row (status=running)
