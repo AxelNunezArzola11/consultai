@@ -6,6 +6,8 @@ import { projects, milestones } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { notFound } from "next/navigation";
 import { TimelineClient } from "./TimelineClient";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 /**
  * Timeline page — /project/[id]/timeline
@@ -25,6 +27,18 @@ export default async function TimelinePage({
 }) {
   const { id } = await params;
 
+  if (isDemoMode()) {
+    const t = getDemoTables();
+    const project = t.projects.find((p) => p.id === id);
+    if (!project) notFound();
+    const milestoneList = t.milestones
+      .filter((m) => m.projectId === id)
+      .sort((a, b) => a.position - b.position);
+    return (
+      <TimelineView projectId={id} projectTitle={project.title} milestoneList={milestoneList} />
+    );
+  }
+
   const [project] = await db
     .select()
     .from(projects)
@@ -38,6 +52,21 @@ export default async function TimelinePage({
     .from(milestones)
     .where(eq(milestones.projectId, id))
     .orderBy(milestones.position);
+
+  return (
+    <TimelineView projectId={id} projectTitle={project.title} milestoneList={milestoneList} />
+  );
+}
+
+function TimelineView({
+  projectId,
+  projectTitle,
+  milestoneList,
+}: {
+  projectId: string;
+  projectTitle: string;
+  milestoneList: Array<typeof milestones.$inferSelect>;
+}) {
 
   const ganttMilestones = milestoneList.map((m) => ({
     id:          m.id,
@@ -56,7 +85,7 @@ export default async function TimelinePage({
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-xl font-bold text-foreground tracking-tight">
-            {project.title}
+            {projectTitle}
           </h1>
           <p className="text-muted-foreground text-sm mt-0.5">
             Milestone Timeline
@@ -78,7 +107,7 @@ export default async function TimelinePage({
         </div>
       ) : (
         <TimelineClient
-          projectId={id}
+          projectId={projectId}
           milestones={ganttMilestones}
         />
       )}

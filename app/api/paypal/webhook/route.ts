@@ -103,6 +103,11 @@ async function tryRecordEventId(eventId: string, eventType: string): Promise<boo
 // ---------------------------------------------------------------------------
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const { isDemoMode: isDemo } = await import("@/lib/demo/config");
+  if (isDemo()) {
+    const { demoBlocked } = await import("@/lib/demo/guard");
+    return demoBlocked("PayPal webhooks");
+  }
   // ── 1. Read raw body as bytes ───────────────────────────────────────────
   // CRITICAL: must use raw bytes for CRC32 + sig verification.
   // Per PayPal docs: "use the original raw body to calculate this; do not parse

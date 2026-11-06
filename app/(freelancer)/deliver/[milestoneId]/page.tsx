@@ -7,6 +7,8 @@ import { eq, and, inArray } from "drizzle-orm";
 import { notFound } from "next/navigation";
 import { PRSubmitForm } from "@/components/delivery/PRSubmitForm";
 import { Badge } from "@/components/ui/badge";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 export default async function FreelancerDeliverPage({
   params,
@@ -14,20 +16,29 @@ export default async function FreelancerDeliverPage({
   params: Promise<{ milestoneId: string }>;
 }) {
   const { milestoneId } = await params;
+  const demoTables = isDemoMode() ? getDemoTables() : null;
 
-  const [milestone] = await db
-    .select()
-    .from(milestones)
-    .where(eq(milestones.id, milestoneId))
-    .limit(1);
+  const milestone = demoTables
+    ? demoTables.milestones.find((m) => m.id === milestoneId)
+    : (
+        await db
+          .select()
+          .from(milestones)
+          .where(eq(milestones.id, milestoneId))
+          .limit(1)
+      )[0];
 
   if (!milestone) notFound();
 
-  const [project] = await db
-    .select()
-    .from(projects)
-    .where(eq(projects.id, milestone.projectId))
-    .limit(1);
+  const project = demoTables
+    ? demoTables.projects.find((p) => p.id === milestone.projectId)
+    : (
+        await db
+          .select()
+          .from(projects)
+          .where(eq(projects.id, milestone.projectId))
+          .limit(1)
+      )[0];
 
   // Milestone must be funded or submitted to accept a PR
   const canSubmit = ["funded", "submitted", "verifying"].includes(milestone.status);

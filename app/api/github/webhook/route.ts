@@ -158,6 +158,11 @@ For each criterion, determine if the submitted work satisfies it.
 // ---------------------------------------------------------------------------
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const { isDemoMode: isDemo } = await import("@/lib/demo/config");
+  if (isDemo()) {
+    const { demoBlocked } = await import("@/lib/demo/guard");
+    return demoBlocked("GitHub webhooks");
+  }
   // Read raw body for HMAC verification
   const rawBody = await req.text();
 

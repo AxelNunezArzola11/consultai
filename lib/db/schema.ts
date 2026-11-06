@@ -914,3 +914,65 @@ export const signals = pgTable("signals", {
   confidence: decimal("confidence", { precision: 4, scale: 3 }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ---------------------------------------------------------------------------
+// agent_executions (Phase 7 — Multi-Agent Supervisor & AI Operations Center)
+// ---------------------------------------------------------------------------
+
+export const agentExecutions = pgTable("agent_executions", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id"),
+  userRequest: text("user_request").notNull(),
+  intent: text("intent").notNull(),
+  supervisorDecision: jsonb("supervisor_decision").notNull().default({}),
+  delegatedAgents: jsonb("delegated_agents").notNull().default([]),
+  handoffs: jsonb("handoffs").notNull().default([]),
+  status: text("status").notNull().default("running"),
+  approvalStatus: text("approval_status").notNull().default("not_required"),
+  structuredOutputs: jsonb("structured_outputs").notNull().default({}),
+  toolCalls: jsonb("tool_calls").notNull().default([]),
+  errors: jsonb("errors").notNull().default([]),
+  retryCount: integer("retry_count").notNull().default(0),
+  promptTokens: integer("prompt_tokens").notNull().default(0),
+  completionTokens: integer("completion_tokens").notNull().default(0),
+  totalTokens: integer("total_tokens").notNull().default(0),
+  durationMs: integer("duration_ms").notNull().default(0),
+  finalResult: text("final_result").notNull().default(""),
+  requestedBy: text("requested_by").notNull().default("company-operator"),
+  decidedBy: text("decided_by"),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// scheduling_proposals (Phase 7 — Planning & Reschedule Agent Proposals)
+// ---------------------------------------------------------------------------
+
+export const schedulingProposals = pgTable("scheduling_proposals", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  executionId: text("execution_id"),
+  proposedByAgent: text("proposed_by_agent")
+    .notNull()
+    .default("reschedule_agent"),
+  overallRisk: text("overall_risk").notNull().default("medium"),
+  totalDelayDays: integer("total_delay_days").notNull().default(0),
+  rationale: text("rationale").notNull().default(""),
+  adjustments: jsonb("adjustments").notNull().default([]),
+  conflicts: jsonb("conflicts").notNull().default([]),
+  status: text("status").notNull().default("pending_approval"),
+  decidedBy: text("decided_by"),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+

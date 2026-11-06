@@ -44,6 +44,10 @@ import { paypalFetch, safeJson } from "@/lib/paypal/client";
 import { db } from "@/lib/db";
 import { milestones, payments } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/db/audit";
+import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
+import { isDemoMode } from "@/lib/demo/config";
+import { demoBlocked } from "@/lib/demo/guard";
 
 export const dynamic = "force-dynamic";
 
@@ -56,6 +60,23 @@ function estimateFee(amount: number): number {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  if (isDemoMode()) return demoBlocked("PayPal order creation");
+  // ── Auth: require role=company or role=admin cookie ───────────────────────
+  const role = await getRoleFromCookie(req.headers.get("cookie"));
+  if (role !== "company" && role !== "admin") {
+    return NextResponse.json({ error: "Forbidden: company or admin role required" }, { status: 403 });
+  }
+
+  // ── Rate limit: 20 order creations per IP per 60 s ────────────────────────
+  const ip = getIp(req);
+  const { ok, retryAfterSec } = checkRateLimit("create-order", ip, 20, 60);
+  if (!ok) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
+  }
+
   try {
     const body = await req.json().catch(() => null);
     const milestoneId = body?.milestoneId as string | undefined;

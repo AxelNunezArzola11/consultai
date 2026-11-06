@@ -50,6 +50,7 @@ import {
   cascadeLog,
 } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
 
@@ -88,6 +89,17 @@ export async function PATCH(
         { status: 400 }
       );
     }
+  }
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const project = getDemoTables().projects.find((p) => p.id === projectId);
+    if (!project) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    project.githubRepoUrl = body.githubRepoUrl ?? null;
+    project.updatedAt = new Date();
+    return NextResponse.json({ ok: true, simulated: true });
   }
 
   try {
@@ -135,6 +147,36 @@ export async function DELETE(
 
   const { id: projectId } = await params;
   console.log("[delete-project] projectId:", projectId);
+
+  if (isDemoMode()) {
+    const { getDemoTables, appendDemoAudit } = await import("@/lib/demo/store");
+    const { DEMO_IDS } = await import("@/lib/demo/config");
+    if (projectId === DEMO_IDS.project) {
+      return NextResponse.json(
+        { error: "The canonical TechNova demo project cannot be deleted. Use Demo Reset to restore fixtures." },
+        { status: 409 }
+      );
+    }
+    const t = getDemoTables();
+    const idx = t.projects.findIndex((p) => p.id === projectId);
+    if (idx < 0) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    t.projects.splice(idx, 1);
+    t.milestones = t.milestones.filter((m) => m.projectId !== projectId);
+    t.candidates = t.candidates.filter((c) => c.projectId !== projectId);
+    t.ndas = t.ndas.filter((n) => n.projectId !== projectId);
+    t.meetings = t.meetings.filter((m) => m.projectId !== projectId);
+    t.schedulingProposals = t.schedulingProposals.filter((s) => s.projectId !== projectId);
+    appendDemoAudit({
+      entityType: "project",
+      entityId: projectId,
+      event: "PROJECT_DELETED",
+      actor: "company-operator",
+      payload: {},
+    });
+    return NextResponse.json({ ok: true, simulated: true });
+  }
 
   try {
     // Verify the project exists before attempting deletion

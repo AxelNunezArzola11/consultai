@@ -8,6 +8,8 @@ import { notFound } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ApprovalCard } from "@/components/payments/ApprovalCard";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 export default async function ApprovalsPage({
   params,
@@ -15,26 +17,41 @@ export default async function ApprovalsPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  const demoTables = isDemoMode() ? getDemoTables() : null;
 
-  const [project] = await db
-    .select()
-    .from(projects)
-    .where(eq(projects.id, id))
-    .limit(1);
+  const project = demoTables
+    ? demoTables.projects.find((p) => p.id === id)
+    : (
+        await db
+          .select()
+          .from(projects)
+          .where(eq(projects.id, id))
+          .limit(1)
+      )[0];
 
   if (!project) notFound();
 
   // Load funded milestones for this project
-  const fundedMilestones = await db
-    .select()
-    .from(milestones)
-    .where(
-      and(
-        eq(milestones.projectId, id),
-        inArray(milestones.status, ["funded", "pending_approval", "verifying"])
-      )
-    )
-    .orderBy(milestones.position);
+  const fundedMilestones = demoTables
+    ? demoTables.milestones
+        .filter(
+          (m) =>
+            m.projectId === id &&
+            (m.status === "funded" ||
+              m.status === "pending_approval" ||
+              m.status === "verifying")
+        )
+        .sort((a, b) => a.position - b.position)
+    : await db
+        .select()
+        .from(milestones)
+        .where(
+          and(
+            eq(milestones.projectId, id),
+            inArray(milestones.status, ["funded", "pending_approval", "verifying"])
+          )
+        )
+        .orderBy(milestones.position);
 
   if (fundedMilestones.length === 0) {
     return (
@@ -49,30 +66,38 @@ export default async function ApprovalsPage({
 
   // Load payments for funded milestones
   const milestoneIds = fundedMilestones.map((m) => m.id);
-  const paymentRows = await db
-    .select()
-    .from(payments)
-    .where(inArray(payments.milestoneId, milestoneIds));
+  const paymentRows = demoTables
+    ? demoTables.payments.filter((p) => milestoneIds.includes(p.milestoneId))
+    : await db
+        .select()
+        .from(payments)
+        .where(inArray(payments.milestoneId, milestoneIds));
 
   // Load pending approvals for these payments
   const paymentIds = paymentRows.map((p) => p.id);
-  const approvalRows = paymentIds.length > 0
-    ? await db
-        .select()
-        .from(approvals)
-        .where(
-          and(
-            inArray(approvals.paymentId, paymentIds),
-            eq(approvals.decision, "pending")
+  const approvalRows = demoTables
+    ? demoTables.approvals.filter(
+        (a) => paymentIds.includes(a.paymentId) && a.decision === "pending"
+      )
+    : paymentIds.length > 0
+      ? await db
+          .select()
+          .from(approvals)
+          .where(
+            and(
+              inArray(approvals.paymentId, paymentIds),
+              eq(approvals.decision, "pending")
+            )
           )
-        )
-    : [];
+      : [];
 
   // Load candidates for context
   const candidateIds = [...new Set(paymentRows.map((p) => p.candidateId).filter(Boolean))] as string[];
-  const candidateRows = candidateIds.length > 0
-    ? await db.select().from(candidates).where(inArray(candidates.id, candidateIds))
-    : [];
+  const candidateRows = demoTables
+    ? demoTables.candidates.filter((c) => candidateIds.includes(c.id))
+    : candidateIds.length > 0
+      ? await db.select().from(candidates).where(inArray(candidates.id, candidateIds))
+      : [];
 
   return (
     <div className="px-6 py-8 max-w-4xl mx-auto w-full space-y-6">

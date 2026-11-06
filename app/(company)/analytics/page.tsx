@@ -17,13 +17,20 @@ import { milestones, payments, candidates } from "@/lib/db/schema";
 
 import { buildStudioData, type InvoiceRow, type CustomerRow } from "@/components/ag-studio-dashboard/data";
 import AgStudioDashboard from "@/components/ag-studio-dashboard/Dashboard";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 export default async function AnalyticsPage() {
+  const demoTables = isDemoMode() ? getDemoTables() : null;
   // ── 1. Fetch invoice rows (milestones LEFT JOIN payments) ─────────────────
-  const milestoneRows = await db.select().from(milestones).limit(500);
+  const milestoneRows = demoTables
+    ? demoTables.milestones.slice(0, 500)
+    : await db.select().from(milestones).limit(500);
 
   // Build a lookup of candidate_id per milestone via the payments table
-  const paymentRows = await db.select().from(payments).limit(500);
+  const paymentRows = demoTables
+    ? demoTables.payments.slice(0, 500)
+    : await db.select().from(payments).limit(500);
   const paymentByMilestone = new Map(
     paymentRows.map((p) => [p.milestoneId, p])
   );
@@ -48,7 +55,9 @@ export default async function AnalyticsPage() {
   });
 
   // ── 2. Fetch customer rows (candidates) ───────────────────────────────────
-  const candidateRows = await db.select().from(candidates).limit(500);
+  const candidateRows = demoTables
+    ? demoTables.candidates.slice(0, 500)
+    : await db.select().from(candidates).limit(500);
 
   const customerRows: CustomerRow[] = candidateRows.map((c) => ({
     id:         c.id,
@@ -64,24 +73,27 @@ export default async function AnalyticsPage() {
   const studioData = buildStudioData(invoiceRows, customerRows);
 
   // ── 4. Render ─────────────────────────────────────────────────────────────
+  // Normal flow inside the shared company layout (header + main) — no fixed
+  // overlay, so the page scrolls and resizes with the rest of the app.
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        // Offset for the shared sidebar/navbar — adjust to match your layout
-        top:  "var(--nav-height, 56px)",
-        left: "var(--sidebar-width, 64px)",
-        background: "#0a0e18",
-        zIndex: 10,
-      }}
-    >
-      {/*
-        AgStudioDashboard is a "use client" component. It receives plain
-        serialisable props from this server component — no DB references
-        are passed across the boundary.
-      */}
-      <AgStudioDashboard studioData={studioData} />
+    <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col space-y-4 px-6 py-6">
+      <div>
+        <h1 className="text-xl font-bold tracking-tight text-white">
+          Analytics
+        </h1>
+        <p className="mt-0.5 text-xs text-slate-400">
+          Milestone invoices and consultant activity, powered by AG Studio
+          dashboards.
+        </p>
+      </div>
+      <div className="min-h-[70vh] flex-1 overflow-hidden rounded-2xl border border-slate-800 bg-[#0a0e18]">
+        {/*
+          AgStudioDashboard is a "use client" component. It receives plain
+          serialisable props from this server component — no DB references
+          are passed across the boundary.
+        */}
+        <AgStudioDashboard studioData={studioData} />
+      </div>
     </div>
   );
 }

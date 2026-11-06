@@ -26,6 +26,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { eq, desc } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { milestones, payments, auditLog } from "@/lib/db/schema";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +36,48 @@ export async function GET(
   { params }: { params: Promise<{ milestoneId: string }> }
 ): Promise<NextResponse> {
   const { milestoneId } = await params;
+
+  if (isDemoMode()) {
+    const t = getDemoTables();
+    const milestone = t.milestones.find((m) => m.id === milestoneId);
+    if (!milestone) {
+      return NextResponse.json({ error: "not found" }, { status: 404 });
+    }
+    const payment = t.payments.find((p) => p.milestoneId === milestoneId) ?? null;
+    const audit = t.auditLog
+      .filter((a) => a.entityId === milestoneId)
+      .sort((a, b) => +b.createdAt - +a.createdAt)
+      .slice(0, 20)
+      .map((a) => ({
+        id: String(a.id),
+        event: a.event,
+        actor: a.actor,
+        createdAt: a.createdAt.toISOString(),
+        payload: a.payload ?? null,
+      }));
+    return NextResponse.json({
+      milestoneId: milestone.id,
+      status: milestone.status,
+      captureGrossUsd: milestone.captureGrossUsd,
+      captureFeeUsd: milestone.captureFeeUsd,
+      captureNetUsd: milestone.captureNetUsd,
+      currency: milestone.currency,
+      paypalOrderId: milestone.paypalOrderId,
+      paypalCaptureId: milestone.paypalCaptureId,
+      paypalPayoutBatchId: milestone.paypalPayoutBatchId,
+      payment: payment
+        ? {
+            id: payment.id,
+            status: payment.status,
+            grossUsd: payment.grossUsd,
+            feeUsd: payment.feeUsd,
+            netUsd: payment.netUsd,
+            payoutFeeUsd: payment.payoutFeeUsd,
+          }
+        : null,
+      audit,
+    });
+  }
 
   const rows = await db
     .select()

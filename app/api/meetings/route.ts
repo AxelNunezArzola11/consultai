@@ -12,6 +12,7 @@ import { nanoid } from "nanoid";
 import { db } from "@/lib/db";
 import { meetings, candidates } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,33 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const projectId = req.nextUrl.searchParams.get("projectId");
   if (!projectId) {
     return NextResponse.json({ error: "projectId required" }, { status: 400 });
+  }
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const t = getDemoTables();
+    const rows = t.meetings
+      .filter((m) => m.projectId === projectId)
+      .sort((a, b) => +b.createdAt - +a.createdAt);
+    const byId = Object.fromEntries(
+      t.candidates
+        .filter((c) => c.projectId === projectId)
+        .map((c) => [c.id, { id: c.id, name: c.name, email: c.email }])
+    );
+    return NextResponse.json({
+      meetings: rows.map((m) => ({
+        id: m.id,
+        candidateId: m.candidateId,
+        projectId: m.projectId,
+        calBookingUid: m.calBookingUid,
+        scheduledAt: m.scheduledAt?.toISOString() ?? null,
+        status: m.status,
+        calCancelReason: m.calCancelReason,
+        bookingLink: m.bookingLink,
+        createdAt: m.createdAt.toISOString(),
+        candidate: byId[m.candidateId] ?? null,
+      })),
+    });
   }
 
   const rows = await db
@@ -83,6 +111,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   if (!candidateId || typeof candidateId !== "string") {
     return NextResponse.json({ error: "candidateId required" }, { status: 400 });
+  }
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const t = getDemoTables();
+    const candidate = t.candidates.find((c) => c.id === candidateId);
+    if (!candidate || candidate.projectId !== projectId) {
+      return NextResponse.json({ error: "Candidate not found in this project" }, { status: 404 });
+    }
+    const id = `demo-meeting-${nanoid(8)}`;
+    const now = new Date();
+    t.meetings.push({
+      id,
+      candidateId,
+      projectId,
+      calBookingUid: null,
+      scheduledAt: scheduledAt && typeof scheduledAt === "string" ? new Date(scheduledAt) : null,
+      status: "scheduled",
+      calCancelReason: null,
+      bookingLink: typeof bookingLink === "string" ? bookingLink : null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return NextResponse.json({ ok: true, id, title: title ?? "Review Meeting", simulated: true }, { status: 201 });
   }
 
   // Verify candidate belongs to this project

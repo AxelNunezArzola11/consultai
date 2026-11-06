@@ -9,6 +9,32 @@ The application is built as a Next.js web platform. Its planning workspace
 combines a high-performance AG Grid backlog with a Bryntum Gantt scheduling
 engine, while server-side AI agents use Groq through the Vercel AI SDK.
 
+## Multi-Agent Architecture & Operational Modules (Argon 4 Upgrade)
+
+ConsultAI implements a coordinated **PydanticAI + Pydantic Graph Multi-Agent Architecture** across both the Python FastAPI backend (`backend/`) and Next.js App Router (`lib/ai-ops/orchestrator-engine.ts`):
+
+- **Central Supervisor Agent** (`backend/orchestrator/supervisor.py`, `backend/orchestrator/workflow.py`): Classifies user requests, selects specialist agents, passes structured context, validates outputs against deterministic policies, tracks token consumption and execution duration, and halts at Human Approval Gates for sensitive financial or schedule operations.
+- **5 Specialist Agents** (`backend/agents/`):
+  - **Planning Agent** (`backend/agents/planning.py`): Generates WBS task breakdowns, dependencies, timeline estimates, critical path, project risks, and Bryntum Gantt task structures.
+  - **Talent Agent** (`backend/agents/talent.py`): Evaluates consultant profiles and verifies real GitHub repository signals without fabricating verification evidence.
+  - **Delivery Agent** (`backend/agents/delivery.py`): Monitors deliverables, analyzes GitHub PR webhooks, evaluates acceptance criteria, and separates deterministic evidence from AI code assessments.
+  - **Finance Agent** (`backend/agents/finance.py`): Calculates milestone fee breakdowns, runs deterministic payment eligibility policies, and prepares human-gated `PaymentProposalModel` records.
+  - **Reschedule Agent** (`backend/agents/reschedule.py`): Analyzes project delays, propagates Finish-to-Start shifts across unlocked milestones, detects resource/dependency conflicts, and produces validated Bryntum scheduling proposals.
+- **6-Stage Financial Security Policy** (`backend/policies/payments.py`, `lib/payments/payment-chat-tools.ts`, `app/api/paypal/payout/route.ts`):
+  1. AI Payment Assessment (advisory only)
+  2. Deterministic Business-Rule Validation
+  3. Explicit Human Authorization (`company` or `admin` operator; AI can never independently authorize transfers or bypass approval)
+  4. Actual PayPal Transaction
+  5. Transaction Confirmation (`payout_batch_id`)
+  6. Persistent Append-Only Audit Record (`audit_log`)
+- **Enterprise Views**:
+  - **Company Dashboard**: `/dashboard`
+  - **Bryntum Gantt Project Planning**: `/planning`
+  - **AG Grid 7-Domain Enterprise Operations**: `/operations` (Consultants, Projects, Tasks, Companies, Contracts, Payments, Agent Executions)
+  - **AI Operations Center (with Live SSE)**: `/ai-ops`
+  - **Freelancer Consultant Portal**: `/freelancer` & `/demo-inbox`
+  - **Administrator Governance & Audit Center**: `/admin`
+
 ## Platform capabilities
 
 - **AI-assisted project planning** — turn natural-language requests into

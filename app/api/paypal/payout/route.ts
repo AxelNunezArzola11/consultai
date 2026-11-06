@@ -23,9 +23,9 @@
  *   Approve via POST /api/paypal/payout/approve with { approvalId }.
  *
  * bypass_approval flag:
- *   When bypass_approval: true is included in the body, the approval gate and threshold
- *   check are skipped entirely. The payout is issued immediately via PayPal Sandbox
- *   without creating an approval record. Intended for chat-triggered payouts.
+ *   Permanently disabled per Section 5. Any bypass_approval value in the body is
+ *   ignored (forced to false); every payout goes through the approval gate and
+ *   reaches `paid` only via PayPal webhook confirmation.
  *
  * Payout amount:
  *   Uses payment.net_usd (what the platform holds after Orders fee).
@@ -43,14 +43,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { executeDirectPayout } from "@/lib/payments/direct-payout";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
+import { isDemoMode } from "@/lib/demo/config";
+import { demoBlocked } from "@/lib/demo/guard";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // ── Auth: require role=company cookie ─────────────────────────────────────
+  if (isDemoMode()) return demoBlocked("PayPal payouts");
+  // ── Auth: require role=company or role=admin cookie ───────────────────────
   const role = await getRoleFromCookie(req.headers.get("cookie"));
-  if (role !== "company") {
-    return NextResponse.json({ error: "Forbidden: company role required" }, { status: 403 });
+  if (role !== "company" && role !== "admin") {
+    return NextResponse.json({ error: "Forbidden: company or admin role required" }, { status: 403 });
   }
 
   // ── Rate limit: 20 payout attempts per IP per 60 s ────────────────────────
@@ -68,7 +71,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const paymentId      = body?.paymentId      as string | undefined;
     const recipientEmail = body?.recipientEmail as string | undefined;
     const note           = (body?.note          as string | undefined) ?? "";
-    const bypass_approval = body?.bypass_approval === true;
+    // Section 5 Security Enforcement: Never allow bypass_approval to skip human authorization gates.
+    const bypass_approval = false;
 
     if (!paymentId || !recipientEmail) {
       return NextResponse.json(

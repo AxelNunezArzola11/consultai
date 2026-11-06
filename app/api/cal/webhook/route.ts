@@ -71,6 +71,11 @@ function validateCalSignature(rawBody: Buffer, signature: string | null): boolea
 // ---------------------------------------------------------------------------
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const { isDemoMode: isDemo } = await import("@/lib/demo/config");
+  if (isDemo()) {
+    const { demoBlocked } = await import("@/lib/demo/guard");
+    return demoBlocked("Cal.com webhooks");
+  }
   const rawBody = Buffer.from(await req.arrayBuffer());
   const signature = req.headers.get("x-cal-signature-256");
 

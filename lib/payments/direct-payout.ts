@@ -8,9 +8,10 @@
  * Extracted from the route file to avoid Next.js app-router type conflicts
  * when non-HTTP-handler exports are present in a route.ts file.
  *
- * bypass_approval=true  → skips approval gate; issues payout immediately
- *                          and sets milestone → paid immediately.
- * bypass_approval=false → normal threshold-based approval gate.
+ * Section 5: bypass_approval is permanently disabled. The parameter is kept
+ * for API compatibility but any `true` value is ignored — every payout goes
+ * through the normal threshold-based approval gate, and milestones reach
+ * `paid` only via PayPal webhook confirmation.
  */
 
 import { eq } from "drizzle-orm";
@@ -38,8 +39,10 @@ export interface DirectPayoutInput {
   paymentId: string;
   recipientEmail: string;
   note?: string;
-  /** When true: skip approval gate, threshold check, and pending-approval record */
+  /** Deprecated: AI bypass is disabled per Section 5 financial security policy */
   bypass_approval?: boolean;
+  /** When true, always require explicit human approval regardless of threshold */
+  require_human_approval?: boolean;
 }
 
 export interface DirectPayoutResult {
@@ -144,14 +147,26 @@ async function createOrReplayPayout(
 /**
  * Executes (or replays) a PayPal payout for a given payment record.
  *
- * bypass_approval=true  → skips approval gate; issues payout immediately;
- *                          sets milestone → paid immediately (no webhook).
- * bypass_approval=false → normal threshold-based approval gate.
+ * Always runs the threshold-based approval gate. The deprecated
+ * `bypass_approval` input is ignored (forced to false) per Section 5 —
+ * no caller can skip human authorization or webhook confirmation.
  */
 export async function executeDirectPayout(
   input: DirectPayoutInput
 ): Promise<DirectPayoutResult> {
-  const { paymentId, recipientEmail, note = "", bypass_approval = false } = input;
+  const {
+    paymentId,
+    recipientEmail,
+    note = "",
+    require_human_approval = false,
+  } = input;
+  // Section 5 enforcement: bypass permanently disabled, regardless of caller input.
+  const bypass_approval = false;
+  if (input.bypass_approval) {
+    console.warn("[direct-payout] bypass_approval=true was requested and ignored (Section 5).", {
+      paymentId,
+    });
+  }
 
   const [paymentRow] = await db
     .select()
@@ -179,10 +194,10 @@ export async function executeDirectPayout(
   const senderBatchId = paymentRow.senderBatchId ?? `PAY_${paymentId}`;
   const senderItemId  = `ITEM_${paymentId}`;
 
-  // ── Approval gate (skipped when bypass_approval=true) ─────────────────────
-  if (!bypass_approval) {
+  // ── Approval gate (Section 5: AI can never bypass; require_human_approval forces gate) ──
+  if (!bypass_approval || require_human_approval) {
     const amountNum    = parseFloat(amountUsd);
-    const needsApproval = amountNum > AUTO_APPROVE_THRESHOLD;
+    const needsApproval = require_human_approval || amountNum > AUTO_APPROVE_THRESHOLD;
 
     if (needsApproval) {
       const [existingApproval] = await db

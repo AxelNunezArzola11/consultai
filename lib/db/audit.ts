@@ -8,6 +8,7 @@
 
 import { db } from "@/lib/db";
 import { auditLog } from "@/lib/db/schema";
+import { isDemoMode } from "@/lib/demo/config";
 
 export interface AuditLogEntry {
   entityType:
@@ -17,7 +18,9 @@ export interface AuditLogEntry {
     | "payment"
     | "nda"
     | "meeting"
-    | "dispute";
+    | "dispute"
+    | "agent_execution"
+    | "scheduling_proposal";
   entityId: string;
   event: string;
   actor: string;
@@ -29,6 +32,16 @@ export interface AuditLogEntry {
  * Returns the inserted row's bigint id.
  */
 export async function writeAuditLog(entry: AuditLogEntry): Promise<bigint> {
+  if (isDemoMode()) {
+    const { appendDemoAudit } = await import("@/lib/demo/store");
+    return appendDemoAudit({
+      entityType: entry.entityType,
+      entityId: entry.entityId,
+      event: entry.event,
+      actor: entry.actor,
+      payload: entry.payload,
+    });
+  }
   const [row] = await db
     .insert(auditLog)
     .values({

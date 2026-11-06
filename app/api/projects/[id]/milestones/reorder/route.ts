@@ -30,6 +30,7 @@ import { milestones } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
 import { writeAuditLog } from "@/lib/db/audit";
 import { isFunded, addDays } from "@/lib/scheduling/dependency-engine";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
 
@@ -130,6 +131,102 @@ export async function POST(
       { error: `newStartDate "${rawStartDate}" is not a valid calendar date` },
       { status: 400 }
     );
+  }
+
+  // ── Demo mode: same guards, writes go to the isolated in-memory store ──
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const t = getDemoTables();
+    const milestone = t.milestones.find(
+      (m) => m.id === milestoneId && m.projectId === projectId
+    );
+    if (!milestone) {
+      return NextResponse.json(
+        { error: "Milestone not found in this project" },
+        { status: 404 }
+      );
+    }
+    if (LOCKED_STATUSES.has(milestone.status) || isFunded(milestone.status)) {
+      return NextResponse.json(
+        {
+          error: `Cannot reschedule milestone in status "${milestone.status}". ` +
+            "Funded, in-payout, paid, and disputed milestones are protected from rescheduling.",
+          status: milestone.status,
+          milestoneId,
+        },
+        { status: 409 }
+      );
+    }
+    if (milestone.dependsOnId) {
+      const dependency = t.milestones.find((m) => m.id === milestone.dependsOnId);
+      if (dependency?.dueDate) {
+        const earliestStart = addDays(dependency.dueDate, 1);
+        if (newStartDate < earliestStart) {
+          return NextResponse.json(
+            {
+              error: `New start_date (${newStartDate}) violates dependency constraint. ` +
+                `Milestone depends on "${dependency.id}" which is due on ${dependency.dueDate}. ` +
+                `Earliest allowed start_date is ${earliestStart}.`,
+              earliestStart,
+              dependsOnId: milestone.dependsOnId,
+              dependencyDueDate: dependency.dueDate,
+            },
+            { status: 409 }
+          );
+        }
+      }
+    }
+    let newDueDate: string | null = milestone.dueDate ?? null;
+    if (milestone.offsetDays != null && milestone.dependsOnId) {
+      const parent = t.milestones.find((m) => m.id === milestone.dependsOnId);
+      if (parent?.dueDate) {
+        newDueDate = addDays(parent.dueDate, milestone.offsetDays);
+      }
+    } else if (milestone.offsetDays != null) {
+      newDueDate = addDays(newStartDate, milestone.offsetDays);
+    }
+    if (milestone.version !== expectedVersion) {
+      return NextResponse.json(
+        {
+          error: "Optimistic concurrency conflict. The milestone was modified by another user. " +
+            "Please refresh and try again.",
+          expectedVersion,
+        },
+        { status: 409 }
+      );
+    }
+    const previousStartDate = milestone.startDate ?? null;
+    const previousDueDate = milestone.dueDate ?? null;
+    milestone.startDate = newStartDate;
+    milestone.dueDate = newDueDate ?? milestone.dueDate;
+    milestone.version = expectedVersion + 1;
+    milestone.updatedAt = new Date();
+    await writeAuditLog({
+      entityType: "milestone",
+      entityId: milestoneId,
+      event: "MILESTONE_RESCHEDULED",
+      actor: "company",
+      payload: {
+        projectId,
+        newStartDate,
+        newDueDate,
+        previousStartDate,
+        previousDueDate,
+        previousVersion: expectedVersion,
+        newVersion: milestone.version,
+        dependsOnId: milestone.dependsOnId ?? null,
+        offsetDays: milestone.offsetDays ?? null,
+      },
+    });
+    return NextResponse.json({
+      ok: true,
+      milestoneId,
+      newStartDate,
+      newDueDate,
+      version: milestone.version,
+      previousVersion: expectedVersion,
+      simulated: true,
+    });
   }
 
   // ── Load the milestone ───────────────────────────────────────────────────

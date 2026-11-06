@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { candidates } from "@/lib/db/schema";
 import { eq, sql, and, ilike, or } from "drizzle-orm";
+import { isDemoMode } from "@/lib/demo/config";
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
@@ -22,6 +23,34 @@ export async function GET(request: NextRequest) {
 
   if (!projectId) {
     return NextResponse.json({ error: "projectId required" }, { status: 400 });
+  }
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const q = (query ?? "").toLowerCase();
+    const results = getDemoTables()
+      .candidates.filter((c) => c.projectId === projectId)
+      .filter(
+        (c) =>
+          !q ||
+          c.name.toLowerCase().includes(q) ||
+          c.email.toLowerCase().includes(q) ||
+          (c.githubHandle ?? "").toLowerCase().includes(q)
+      )
+      .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        email: c.email,
+        githubHandle: c.githubHandle,
+        trustScore: c.trustScore,
+        status: c.status,
+        rank: c.rank,
+        vettingConsentAt: c.vettingConsentAt,
+        vettingRanAt: c.vettingRanAt,
+        canDo: c.canDo,
+      }));
+    return NextResponse.json({ results, query: query ?? null, method: "demo_substring" });
   }
 
   // Shared column selection (includes vetting fields for compliance view)

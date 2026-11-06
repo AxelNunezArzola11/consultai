@@ -7,6 +7,8 @@ import { eq, desc } from "drizzle-orm";
 import { notFound } from "next/navigation";
 import { MoneyFlowPanel } from "@/components/payments/MoneyFlowPanel";
 import { MilestonesClientExtensions } from "./MilestonesClientExtensions";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 /**
  * Milestones page — Phase 1 Step 6.
@@ -43,6 +45,22 @@ export default async function MilestonesPage({
 }) {
   const { id } = await params;
 
+  if (isDemoMode()) {
+    const t = getDemoTables();
+    const project = t.projects.find((p) => p.id === id);
+    if (!project) notFound();
+    const milestoneList = t.milestones
+      .filter((m) => m.projectId === id)
+      .sort((a, b) => a.position - b.position);
+    const auditEntries = t.auditLog
+      .filter((a) => a.entityType === "milestone")
+      .sort((a, b) => +b.createdAt - +a.createdAt)
+      .slice(0, 100);
+    return (
+      <MilestonesView projectId={id} project={project} milestoneList={milestoneList} auditEntries={auditEntries} demoMode />
+    );
+  }
+
   const [project] = await db
     .select()
     .from(projects)
@@ -65,6 +83,25 @@ export default async function MilestonesPage({
         .orderBy(desc(auditLog.createdAt))
         .limit(100)
     : [];
+
+  return (
+    <MilestonesView projectId={id} project={project} milestoneList={milestoneList} auditEntries={auditEntries} />
+  );
+}
+
+function MilestonesView({
+  projectId,
+  project,
+  milestoneList,
+  auditEntries,
+  demoMode,
+}: {
+  projectId: string;
+  project: typeof projects.$inferSelect;
+  milestoneList: Array<typeof milestones.$inferSelect>;
+  auditEntries: Array<typeof auditLog.$inferSelect>;
+  demoMode?: boolean;
+}) {
 
   const totalBudget = milestoneList.reduce((acc, m) => acc + Number(m.budgetUsd), 0);
   const paidCount = milestoneList.filter((m) => m.status === "paid").length;
@@ -93,7 +130,7 @@ export default async function MilestonesPage({
 
       {/* Client-side extensions: compliance bar, meetings, payment chat, gantt */}
       <MilestonesClientExtensions
-        projectId={id}
+        projectId={projectId}
         milestones={milestoneList.map((m) => ({
           id: m.id,
           title: m.title,
@@ -172,6 +209,11 @@ export default async function MilestonesPage({
                     initialNetUsd={m.captureNetUsd ?? null}
                     initialCurrency={m.currency ?? null}
                     initialAudit={relatedAudit}
+                    fundingDisabledReason={
+                      demoMode
+                        ? "PayPal funding is unavailable in offline demo mode. The ledger above shows simulated captures for this fictional scenario."
+                        : undefined
+                    }
                   />
                 </div>
               </div>

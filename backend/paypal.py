@@ -1,81 +1,47 @@
 """
-PayPal Payouts API helper.
+Backward-compatible `backend.paypal` module delegating to `backend.tools.paypal`.
+Enforces Section 5 Financial & Security rules:
+- Never hardcodes live PayPal URL when in sandbox.
+- Never fabricates mock batch IDs.
 """
-from __future__ import annotations
+from decimal import Decimal
+from typing import Any, Dict
 
-import base64
-import os
-import uuid
-from typing import Any
+from backend.tools.paypal import (
+    PayPalAPIError,
+    PayPalConfigError,
+    create_verified_payout,
+    get_paypal_access_token,
+    get_paypal_base_url,
+)
 
-import httpx
-
-
-PAYPAL_BASE_URL = "https://api-m.paypal.com"  # production; swap to sandbox for testing
-
-
-async def _get_access_token() -> str:
-    client_id = os.environ["PAYPAL_CLIENT_ID"]
-    client_secret = os.environ["PAYPAL_CLIENT_SECRET"]
-    credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{PAYPAL_BASE_URL}/v1/oauth2/token",
-            headers={
-                "Authorization": f"Basic {credentials}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            data={"grant_type": "client_credentials"},
-            timeout=15.0,
-        )
-        response.raise_for_status()
-        return response.json()["access_token"]
+__all__ = [
+    "PayPalAPIError",
+    "PayPalConfigError",
+    "get_paypal_access_token",
+    "get_paypal_base_url",
+    "create_payout",
+]
 
 
-async def release_milestone_payout(
+async def create_payout(
     recipient_email: str,
-    amount_usd: float,
-    milestone_id: str,
-    note: str = "Milestone payout from ConsultAI",
-) -> dict[str, Any]:
+    amount: float | int | str | Decimal,
+    currency: str = "USD",
+    milestone_id: str = "milestone-default",
+    note: str = "ConsultAI automated milestone payout",
+    approval_id: str = "",
+    authorized_by: str = "",
+) -> Dict[str, Any]:
     """
-    Trigger a PayPal Payout for a single recipient.
-    Returns the PayPal API response dict on success.
-    Raises httpx.HTTPStatusError on failure.
+    Executes a verified PayPal payout. Requires human authorization (`approval_id` and `authorized_by`).
     """
-    token = await _get_access_token()
-    sender_batch_id = f"consultai-milestone-{milestone_id}-{uuid.uuid4().hex[:8]}"
-
-    payload = {
-        "sender_batch_header": {
-            "sender_batch_id": sender_batch_id,
-            "email_subject": "ConsultAI Milestone Payout",
-            "email_message": note,
-        },
-        "items": [
-            {
-                "recipient_type": "EMAIL",
-                "amount": {
-                    "value": f"{amount_usd:.2f}",
-                    "currency": "USD",
-                },
-                "receiver": recipient_email,
-                "note": note,
-                "sender_item_id": milestone_id,
-            }
-        ],
-    }
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{PAYPAL_BASE_URL}/v1/payments/payouts",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=20.0,
-        )
-        response.raise_for_status()
-        return response.json()
+    return await create_verified_payout(
+        recipient_email=recipient_email,
+        amount_dollars=amount,
+        currency=currency,
+        milestone_id=milestone_id,
+        approval_id=approval_id,
+        authorized_by=authorized_by,
+        note=note,
+    )

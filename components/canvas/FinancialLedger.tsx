@@ -194,7 +194,7 @@ function buildColumnDefs(): ColDef<LedgerRow>[] {
       headerName: "Status",
       width: 160,
       sortable: true,
-      filter: "agSetColumnFilter",
+      filter: "agTextColumnFilter",
       cellRenderer: StatusCellRenderer,
     },
     {

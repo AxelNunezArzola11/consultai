@@ -25,6 +25,7 @@ import { nanoid } from "nanoid";
 import { db } from "@/lib/db";
 import { candidates, projects } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +61,41 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const { projectId, githubHandle, name, email } = parsed.data;
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const t = getDemoTables();
+    const project = t.projects.find((p) => p.id === projectId);
+    if (!project) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    const existing = t.candidates.find((c) => c.githubHandle === githubHandle);
+    if (existing) {
+      return NextResponse.json({ id: existing.id, alreadyExists: true, simulated: true });
+    }
+    const id = `demo-cand-${nanoid(8)}`;
+    const now = new Date();
+    t.candidates.push({
+      id,
+      projectId,
+      name: name ?? `@${githubHandle}`,
+      email: email ?? `${githubHandle}@github.placeholder`,
+      githubHandle,
+      portfolioUrl: null,
+      trustScore: null,
+      canDo: null,
+      cannotDo: null,
+      vettingSummary: null,
+      rank: t.candidates.filter((c) => c.projectId === projectId).length + 1,
+      status: "pending",
+      rejectionReason: null,
+      vettingConsentAt: now,
+      vettingRanAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return NextResponse.json({ id, alreadyExists: false, simulated: true }, { status: 201 });
+  }
 
   // Verify project exists
   const [project] = await db

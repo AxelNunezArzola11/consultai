@@ -27,10 +27,13 @@ import {
 import { writeAuditLog } from "@/lib/db/audit";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
+import { isDemoMode } from "@/lib/demo/config";
+import { demoBlocked } from "@/lib/demo/guard";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  if (isDemoMode()) return demoBlocked("PayPal payout approval");
   // ── Auth: require role=company cookie ─────────────────────────────────────
   const role = await getRoleFromCookie(req.headers.get("cookie"));
   if (role !== "company") {

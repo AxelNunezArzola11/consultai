@@ -13,6 +13,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { verificationRuns, agentSteps, paymentProposals } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,21 @@ export async function GET(
   const { runId } = await params;
   if (!runId) {
     return NextResponse.json({ error: "runId required" }, { status: 400 });
+  }
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const t = getDemoTables();
+    const run = t.verificationRuns.find((r) => r.id === runId);
+    if (!run) {
+      return NextResponse.json({ error: "Run not found" }, { status: 404 });
+    }
+    return NextResponse.json({
+      run,
+      steps: [],
+      proposals: t.paymentProposals.filter((p) => p.runId === runId),
+      simulated: true,
+    });
   }
 
   const [run] = await db

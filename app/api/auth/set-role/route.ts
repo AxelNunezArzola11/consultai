@@ -13,7 +13,7 @@ import { signRoleCookie, type Role } from "@/lib/auth/role-cookie";
 
 export const dynamic = "force-dynamic";
 
-const VALID_ROLES: Role[] = ["company", "freelancer"];
+const VALID_ROLES: Role[] = ["company", "freelancer", "admin"];
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {

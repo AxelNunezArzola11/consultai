@@ -40,6 +40,7 @@ import { writeAuditLog } from "@/lib/db/audit";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { fetchPRDetails, GitHubApiError } from "@/lib/delivery/github-client";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
 
@@ -87,6 +88,65 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { error: "recipientEmail is required when approving" },
         { status: 400 }
       );
+    }
+
+    // ── Demo mode: record the decision, NEVER execute a payout ──────────
+    if (isDemoMode()) {
+      const { getDemoTables } = await import("@/lib/demo/store");
+      const proposal = getDemoTables().paymentProposals.find((p) => p.id === proposalId);
+      if (!proposal) {
+        return NextResponse.json({ error: "Proposal not found" }, { status: 404 });
+      }
+      if (proposal.status === "approved") {
+        return NextResponse.json({
+          status: "ok",
+          message: "Proposal already approved (idempotent)",
+          proposalId,
+          decision: "approved",
+          simulated: true,
+        });
+      }
+      if (proposal.status === "rejected") {
+        return NextResponse.json({
+          status: "ok",
+          message: "Proposal already rejected",
+          proposalId,
+          decision: "rejected",
+          simulated: true,
+        });
+      }
+      const approvableStatuses = ["pending", "requires_approval", "auto_release_eligible"];
+      if (!approvableStatuses.includes(proposal.status)) {
+        return NextResponse.json(
+          { error: `Proposal is in status '${proposal.status}' — cannot approve` },
+          { status: 409 }
+        );
+      }
+      const decidedAt = new Date();
+      proposal.status = decision === "approved" ? "approved" : "rejected";
+      proposal.decidedBy = "company";
+      proposal.decidedAt = decidedAt;
+      proposal.decisionNotes = notes;
+      proposal.updatedAt = decidedAt;
+      await writeAuditLog({
+        entityType: "milestone",
+        entityId: proposal.milestoneId,
+        event: decision === "approved" ? "PROPOSAL_APPROVED" : "PROPOSAL_REJECTED",
+        actor: "company",
+        payload: { proposalId, amountUsd: proposal.amountUsd, notes },
+      });
+      return NextResponse.json({
+        status: "ok",
+        proposalId,
+        decision,
+        boundSha: proposal.boundHeadSha.substring(0, 8),
+        payout: null,
+        payoutExecuted: false,
+        payoutNote:
+          "Offline demo mode: the approval decision is recorded, but no payout is executed. " +
+          "No simulated payment is reported as completed.",
+        simulated: true,
+      });
     }
 
     // ── Load proposal ─────────────────────────────────────────────────────

@@ -19,18 +19,34 @@ import { SignJWT, jwtVerify } from "jose";
 const COOKIE_NAME = "consultai_role_v1";
 const MAX_AGE_S = 60 * 60 * 24; // 24 hours
 
+let ephemeralDemoSecret: Uint8Array | null = null;
+
 function getSecret(): Uint8Array {
   const secret = process.env.ROLE_COOKIE_SECRET;
-  if (!secret || secret.length < 32) {
-    throw new Error(
-      "ROLE_COOKIE_SECRET must be set and at least 32 characters. " +
-        "Generate with: openssl rand -hex 32"
-    );
+  if (secret && secret.length >= 32) {
+    return new TextEncoder().encode(secret);
   }
-  return new TextEncoder().encode(secret);
+  // Offline demo mode serves fictional data only: fall back to a random
+  // per-instance secret so role switching works with zero configuration.
+  // NEVER used when a real secret is set or in live mode.
+  if (process.env.DEMO_MODE === "true") {
+    if (!ephemeralDemoSecret) {
+      ephemeralDemoSecret = new Uint8Array(32);
+      crypto.getRandomValues(ephemeralDemoSecret);
+      console.warn(
+        "[auth] DEMO_MODE without ROLE_COOKIE_SECRET — using an ephemeral per-instance signing secret. " +
+          "Role cookies will not survive a restart. Set ROLE_COOKIE_SECRET for persistent sessions."
+      );
+    }
+    return ephemeralDemoSecret;
+  }
+  throw new Error(
+    "ROLE_COOKIE_SECRET must be set and at least 32 characters. " +
+      "Generate with: openssl rand -hex 32"
+  );
 }
 
-export type Role = "company" | "freelancer";
+export type Role = "company" | "freelancer" | "admin";
 
 /**
  * Signs a role into a compact JWT and returns the Set-Cookie header value.
@@ -81,7 +97,7 @@ export async function getRoleFromCookie(
       algorithms: ["HS256"],
     });
     const role = payload.role as string | undefined;
-    if (role === "company" || role === "freelancer") return role;
+    if (role === "company" || role === "freelancer" || role === "admin") return role;
     return null;
   } catch {
     return null;

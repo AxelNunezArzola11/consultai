@@ -23,7 +23,13 @@ import { writeAuditLog } from "@/lib/db/audit";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  if (process.env.DEMO_MODE !== "true" && process.env.NODE_ENV !== "development") {
+  const { areDemoWriteControlsEnabled, isDemoMode } = await import(
+    "@/lib/demo/config"
+  );
+  if (isDemoMode()) {
+    return NextResponse.json({ error: "demo_mode_offline" }, { status: 403 });
+  }
+  if (!areDemoWriteControlsEnabled()) {
     return NextResponse.json({ error: "demo_mode_disabled" }, { status: 403 });
   }
 

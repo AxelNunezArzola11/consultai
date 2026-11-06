@@ -27,6 +27,7 @@ import {
   paymentChatTools,
   buildPaymentChatSystemPrompt,
 } from "@/lib/payments/payment-chat-tools";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const runtime = "nodejs";
 // maxDuration is a hint to Vercel — actual cap depends on plan:
@@ -71,6 +72,16 @@ function classifyLLMError(err: unknown): string {
 // ── POST handler ───────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  if (isDemoMode()) {
+    return Response.json(
+      {
+        error:
+          "Payment chat requires live AI services, which are unavailable in offline demo mode. " +
+          "Review the simulated payment proposals and approvals in the AI Ops Center and Approvals pages instead.",
+      },
+      { status: 503 }
+    );
+  }
   // ── Diagnostic: confirm env vars are visible in this serverless instance ──
   console.log("[payment-chat] env check:", {
     DATABASE_URL: !!process.env.DATABASE_URL,

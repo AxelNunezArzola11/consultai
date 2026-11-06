@@ -168,9 +168,19 @@ export async function triggerCascade(params: TriggerCascadeParams): Promise<void
       throw new Error(`Project ${projectId} not found during cascade`);
     }
 
+    // Real company name for the NDA parties block.
+    const { companies } = await import("@/lib/db/schema");
+    const [company] = project.companyId
+      ? await db
+          .select()
+          .from(companies)
+          .where(eq(companies.id, project.companyId))
+          .limit(1)
+      : [];
+
     const { documentHash } = await generateNdaPdf({
       projectTitle: project.title,
-      companyName: "Demo Company",
+      companyName: company?.name ?? "Demo Company",
       candidateName: nextCandidate.name,
     });
 
@@ -197,10 +207,8 @@ export async function triggerCascade(params: TriggerCascadeParams): Promise<void
       expiresAt: ndaExpiry,
     });
 
-    // Build invite URL for demo-inbox
-    const { buildWebhookUrl } = await import("@/lib/constants/routes");
-    const inviteUrl = `${buildWebhookUrl("/invite")}/${ndaId}:${rawToken}`;
-
+    // NOTE: the raw-token invite URL is intentionally NOT persisted anywhere.
+    // Operators issue a fresh single-use link via POST /api/nda/regenerate.
     await writeAuditLog({
       entityType: "nda",
       entityId: ndaId,
@@ -210,7 +218,7 @@ export async function triggerCascade(params: TriggerCascadeParams): Promise<void
         candidateId: nextCandidate.id,
         projectId,
         cascadeRound: round,
-        inviteUrl,
+        tokenExpiresAt: tokenExpiry.toISOString(),
       },
     });
 

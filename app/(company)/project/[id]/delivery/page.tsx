@@ -3,12 +3,14 @@ export const dynamic = "force-dynamic";
 
 import { db } from "@/lib/db";
 import { projects, milestones, verificationRuns, candidates } from "@/lib/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, inArray } from "drizzle-orm";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ActivityStream } from "@/components/delivery/ActivityStream";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 export default async function CompanyDeliveryPage({
   params,
@@ -16,42 +18,68 @@ export default async function CompanyDeliveryPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  const demoTables = isDemoMode() ? getDemoTables() : null;
 
-  const [project] = await db
-    .select()
-    .from(projects)
-    .where(eq(projects.id, id))
-    .limit(1);
+  const project = demoTables
+    ? demoTables.projects.find((p) => p.id === id)
+    : (
+        await db
+          .select()
+          .from(projects)
+          .where(eq(projects.id, id))
+          .limit(1)
+      )[0];
 
   if (!project) notFound();
 
   // Get milestones that are in verifying or later states
-  const activeMilestones = await db
-    .select()
-    .from(milestones)
-    .where(eq(milestones.projectId, id))
-    .orderBy(milestones.position);
+  const activeMilestones = demoTables
+    ? demoTables.milestones
+        .filter((m) => m.projectId === id)
+        .sort((a, b) => a.position - b.position)
+    : await db
+        .select()
+        .from(milestones)
+        .where(eq(milestones.projectId, id))
+        .orderBy(milestones.position);
 
-  // Get all verification runs for these milestones
+  // Get verification runs for ALL project milestones (2 most recent each),
+  // preserving milestone-specific results.
   const milestoneIds = activeMilestones.map((m) => m.id);
-  const runs =
-    milestoneIds.length > 0
+  const allRuns = demoTables
+    ? demoTables.verificationRuns
+        .filter((r) => r.milestoneId && milestoneIds.includes(r.milestoneId))
+        .sort((a, b) => +b.createdAt - +a.createdAt)
+        .slice(0, 50)
+    : milestoneIds.length > 0
       ? await db
           .select()
           .from(verificationRuns)
-          .where(
-            eq(verificationRuns.milestoneId, milestoneIds[0]) // simplify for now
-          )
+          .where(inArray(verificationRuns.milestoneId, milestoneIds))
           .orderBy(desc(verificationRuns.createdAt))
-          .limit(10)
+          .limit(50)
       : [];
 
+  const runsByMilestone = new Map<string, typeof allRuns>();
+  for (const run of allRuns) {
+    if (!run.milestoneId) continue;
+    const group = runsByMilestone.get(run.milestoneId) ?? [];
+    if (group.length < 2) group.push(run);
+    runsByMilestone.set(run.milestoneId, group);
+  }
+  const runs = [...runsByMilestone.values()].flat();
+  const milestoneTitleById = new Map(
+    activeMilestones.map((m) => [m.id, m.title])
+  );
+
   // Get selected candidate for recipient email (if any)
-  const selectedCandidate = await db
-    .select()
-    .from(candidates)
-    .where(eq(candidates.projectId, id))
-    .limit(1);
+  const selectedCandidate = demoTables
+    ? demoTables.candidates.filter((c) => c.projectId === id).slice(0, 1)
+    : await db
+        .select()
+        .from(candidates)
+        .where(eq(candidates.projectId, id))
+        .limit(1);
 
   const recipientEmail = selectedCandidate[0]?.email ?? undefined;
 
@@ -114,7 +142,9 @@ export default async function CompanyDeliveryPage({
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-sm">
-                    Run {run.id.substring(0, 12)}…
+                    Run {run.id.substring(0, 12)}… ·{" "}
+                    {milestoneTitleById.get(run.milestoneId ?? "") ??
+                      "Unknown milestone"}
                   </CardTitle>
                   <Badge
                     variant={

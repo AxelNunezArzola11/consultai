@@ -1,271 +1,391 @@
 """
-ConsultAI FastAPI backend — main application entry point.
-
-Endpoints:
-  POST /api/webhooks/github          — GitHub webhook listener (PR merged / push)
-  POST /api/payouts/check-threshold  — Milestone payout threshold check & release
+ConsultAI Backend Application Entrypoint (`backend.main`).
+Exposes:
+- Multi-Agent Orchestrator & Specialist Agent endpoints (`backend.orchestrator.router`)
+- GitHub Webhook Verification (`POST /api/webhooks/github`) with HMAC signature validation
+- Financial Threshold & Payout Verification (`POST /api/payouts/check-threshold`) with strict 6-stage separation
+- Health & Readiness Probes (`GET /health`, `GET /ready`)
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
+from contextlib import asynccontextmanager
 import logging
 import os
-from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 
-from .agents import run_vetting, run_payout_check
-from .db import upsert_vetting_result, get_milestone, update_milestone_status
-from .paypal import release_milestone_payout
+from backend.agents.delivery import execute_delivery_agent
+from backend.agents.finance import execute_finance_agent
+from backend.db import close_db, get_pool, init_db
+from backend.models import (
+    GitHubWebhookPayload,
+    PRVerificationResult,
+    ThresholdCheckRequest,
+    ThresholdCheckResponse,
+)
+from backend.orchestrator.router import router as orchestrator_router
+from backend.orchestrator.state import telemetry_registry
+from backend.paypal import PayPalAPIError, PayPalConfigError
+from backend.policies.permissions import (
+    require_human_authorization_actor,
+    require_internal_service_secret,
+    verify_github_webhook_signature,
+)
+from backend.schemas.requests import DeliveryAgentRequest, FinanceAgentRequest
+from backend.services.audit import write_audit_record
+from backend.tools.paypal import create_verified_payout
 
+load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Lifespan
-# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("consultai.backend")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warm-up: nothing expensive needed at start; pool is lazy.
+    logger.info("Starting ConsultAI Multi-Agent Backend Service...")
+    await init_db()
     yield
+    logger.info("Shutting down ConsultAI Multi-Agent Backend Service...")
+    await close_db()
 
 
 app = FastAPI(
-    title="ConsultAI Backend",
-    description="FastAPI + PydanticAI backend for ConsultAI powered by Groq",
-    version="0.1.0",
+    title="ConsultAI Multi-Agent Orchestration & Autonomous Operations API",
+    version="2.0.0",
+    description=(
+        "Production-grade PydanticAI Multi-Agent Consulting & Project Management Backend "
+        "with Supervisor Orchestration, Bryntum Gantt, AG Grid Operations, and 6-Stage Financial Security."
+    ),
     lifespan=lifespan,
 )
 
+raw_origins = os.getenv("CORS_ALLOW_ORIGINS", "*")
+allow_origins = [o.strip() for o in raw_origins.split(",") if o.strip()] or ["*"]
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins,
+    allow_credentials=False if "*" in allow_origins else True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def _verify_github_signature(payload: bytes, signature_header: str | None) -> None:
-    """Validate GitHub HMAC-SHA256 webhook signature."""
-    secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
-    if not secret:
-        return  # Skip verification if secret not configured (dev mode)
-
-    if not signature_header or not signature_header.startswith("sha256="):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or malformed X-Hub-Signature-256 header",
-        )
-
-    expected = "sha256=" + hmac.new(
-        secret.encode(), payload, digestmod=hashlib.sha256
-    ).hexdigest()
-
-    if not hmac.compare_digest(expected, signature_header):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid webhook signature",
-        )
+# Mount the Multi-Agent Orchestrator & AI Operations Center router
+app.include_router(orchestrator_router)
 
 
-# ---------------------------------------------------------------------------
-# Background task — runs PydanticAI vetting after webhook delivery
-# ---------------------------------------------------------------------------
-
-async def _vet_and_persist(
-    candidate_id: str,
-    pr_number: int,
-    diff_url: str,
-) -> None:
-    """Fetch the diff, run AI vetting, and persist the result to Neon."""
-    import httpx  # local import to keep startup fast
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            diff_response = await client.get(
-                diff_url,
-                headers={"Accept": "application/vnd.github.v3.diff"},
-            )
-            diff_text = diff_response.text if diff_response.status_code == 200 else ""
-    except Exception:
-        diff_text = ""
-
-    result = await run_vetting(candidate_id, pr_number, diff_text)
-    await upsert_vetting_result(result.model_dump())
+@app.get("/health", tags=["System"])
+async def health_check() -> Dict[str, Any]:
+    """Liveness probe for Render & uptime monitors."""
+    return {
+        "status": "ok",
+        "service": "consultai-multi-agent-backend",
+        "version": "2.0.0",
+        "agents_registered": len(telemetry_registry.list_status()),
+    }
 
 
-# ---------------------------------------------------------------------------
-# Route 1 — GitHub Webhook
-# ---------------------------------------------------------------------------
-
-class WebhookResponse(BaseModel):
-    received: bool
-    event: str
-    action: str | None = None
-    detail: str = ""
+@app.get("/ready", tags=["System"])
+async def readiness_check() -> Dict[str, Any]:
+    """Readiness probe verifying database pool and LLM configuration state."""
+    pool = get_pool()
+    db_ready = pool is not None
+    groq_configured = bool(os.getenv("GROQ_API_KEY", "").strip())
+    paypal_configured = bool(
+        os.getenv("PAYPAL_CLIENT_ID", "").strip() and os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
+    )
+    return {
+        "status": "ready",
+        "database_connected": db_ready,
+        "groq_llm_configured": groq_configured,
+        "paypal_configured": paypal_configured,
+    }
 
 
 @app.post(
     "/api/webhooks/github",
-    response_model=WebhookResponse,
-    summary="GitHub Webhook Listener",
-    tags=["webhooks"],
+    response_model=PRVerificationResult,
+    status_code=status.HTTP_200_OK,
+    tags=["Webhooks"],
 )
-async def github_webhook(
+async def github_webhook_handler(
     request: Request,
-    background_tasks: BackgroundTasks,
-    x_hub_signature_256: str | None = Header(None),
-    x_github_event: str | None = Header(None),
-) -> WebhookResponse:
+    x_github_event: Optional[str] = Header(default=None),
+    x_hub_signature_256: Optional[str] = Header(default=None),
+) -> PRVerificationResult:
     """
-    Receives `pull_request` (closed/merged) and `push` events from GitHub.
-    For merged PRs, triggers a background PydanticAI vetting task that
-    analyses the diff and updates candidate/milestone progress in Neon Postgres.
+    Receives GitHub pull_request webhooks, validates HMAC-SHA256 signature,
+    and delegates verification to the Delivery Agent.
     """
     raw_body = await request.body()
-    _verify_github_signature(raw_body, x_hub_signature_256)
-
-    try:
-        payload: dict[str, Any] = json.loads(raw_body)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload")
-
-    event = x_github_event or "unknown"
-    action = payload.get("action")
-
-    # Handle pull_request.closed (merged)
-    if event == "pull_request" and action == "closed":
-        pr = payload.get("pull_request", {})
-        merged = pr.get("merged", False)
-
-        if merged:
-            pr_number = pr.get("number", 0)
-            # Use the sender login as a proxy for candidate_id
-            candidate_id = pr.get("user", {}).get("login", "unknown")
-            diff_url = pr.get("url", "")
-
-            background_tasks.add_task(
-                _vet_and_persist,
-                candidate_id,
-                pr_number,
-                diff_url,
-            )
-            return WebhookResponse(
-                received=True,
-                event=event,
-                action=action,
-                detail=f"Vetting task queued for PR #{pr_number} by {candidate_id}",
-            )
-
-    # Handle push events — log receipt, no vetting needed
-    if event == "push":
-        ref = payload.get("ref", "")
-        commits = len(payload.get("commits", []))
-        return WebhookResponse(
-            received=True,
-            event=event,
-            action=None,
-            detail=f"Push to {ref} with {commits} commit(s) acknowledged",
+    if not verify_github_webhook_signature(raw_body, x_hub_signature_256):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing GitHub webhook HMAC-SHA256 signature.",
         )
 
-    # All other events acknowledged but not processed
-    return WebhookResponse(
-        received=True,
-        event=event,
-        action=action,
-        detail="Event acknowledged but not processed",
+    try:
+        payload = GitHubWebhookPayload.model_validate_json(raw_body)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid GitHub webhook payload: {exc}",
+        ) from exc
+
+    if x_github_event and x_github_event != "pull_request":
+        return PRVerificationResult(
+            trust_score=0,
+            verdict="needs_work",
+            summary=f"Ignored non-PR GitHub event: {x_github_event}",
+            strengths=[],
+            blocking_issues=["Event is not a pull_request"],
+            recommended_payout_percentage=0,
+        )
+
+    if payload.pull_request is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing pull_request object in webhook payload.",
+        )
+
+    pr = payload.pull_request
+    logger.info(
+        "Verifying PR #%s (%s) on %s via Delivery Agent",
+        pr.number,
+        payload.action,
+        payload.repository.full_name,
     )
 
+    d_req = DeliveryAgentRequest(
+        project_id="proj-webhook",
+        milestone_id=f"pr-{pr.number}",
+        milestone_title=pr.title,
+        pr_url=pr.html_url,
+        repository_full_name=payload.repository.full_name,
+        pr_number=pr.number,
+        pr_title=pr.title,
+        pr_body=pr.body or "",
+    )
+    d_resp, _, _, _, _ = await execute_delivery_agent(d_req)
 
-# ---------------------------------------------------------------------------
-# Route 2 — Threshold Payment Engine
-# ---------------------------------------------------------------------------
+    verdict_map: Dict[str, Any] = {
+        "approved_for_payout_review": "approved",
+        "needs_remediation": "needs_work",
+        "rejected": "rejected",
+    }
+    mapped_verdict = verdict_map.get(d_resp.verdict, "needs_work")
+    rec_pct = 100 if d_resp.trust_score >= 80 else (50 if d_resp.trust_score >= 60 else 0)
 
-class ThresholdCheckRequest(BaseModel):
-    milestone_id: str = Field(..., description="Milestone to evaluate")
-    candidate_id: str = Field(..., description="Candidate associated with the milestone")
-    recipient_email: str = Field(..., description="PayPal recipient email for payout")
-    budget_usd: float = Field(..., gt=0.0, description="Milestone budget in USD")
-    trust_score: float = Field(..., ge=0.0, le=100.0, description="Current candidate trust score")
-    tests_passing: bool = Field(..., description="Whether all unit tests are passing")
+    await write_audit_record(
+        actor="github_webhook",
+        action="delivery.webhook_verified",
+        entity_type="milestone",
+        entity_id=f"pr-{pr.number}",
+        payload={
+            "repository": payload.repository.full_name,
+            "pr_number": pr.number,
+            "trust_score": d_resp.trust_score,
+            "verdict": mapped_verdict,
+        },
+    )
 
-
-class ThresholdCheckResponse(BaseModel):
-    milestone_id: str
-    threshold_met: bool
-    payout_released: bool
-    payout_batch_id: str | None = None
-    reason: str
+    return PRVerificationResult(
+        trust_score=d_resp.trust_score,
+        verdict=mapped_verdict,
+        summary=d_resp.summary,
+        strengths=d_resp.verified_evidence_items + d_resp.ai_assessment_items,
+        blocking_issues=d_resp.incomplete_work_items + d_resp.security_or_quality_warnings,
+        recommended_payout_percentage=rec_pct,
+    )
 
 
 @app.post(
     "/api/payouts/check-threshold",
     response_model=ThresholdCheckResponse,
-    summary="Check Milestone Payout Threshold",
-    tags=["payouts"],
+    status_code=status.HTTP_200_OK,
+    tags=["Financial Operations"],
 )
-async def check_payout_threshold(body: ThresholdCheckRequest) -> ThresholdCheckResponse:
+async def check_threshold_and_payout(
+    req: ThresholdCheckRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> ThresholdCheckResponse:
     """
-    Evaluates whether a milestone's payout threshold has been met.
-    Threshold: Trust Score >= 75 AND all unit tests passing.
-    When met, triggers a PayPal Payout API release for the milestone budget.
-    Falls back gracefully when Groq, PayPal, or DB credentials are unavailable.
+    Section 5 — 6-Stage Separated Financial Endpoint:
+    0. Internal service authentication (`INTERNAL_API_SECRET` bearer — rejects anonymous callers)
+    1. AI Payment Assessment (Finance Agent)
+    2. Deterministic Business-Rule Validation (`evaluate_payment_policy`)
+    3. Human Authorization Check (`approval_id` + `authorized_by`)
+    4. Actual PayPal Transaction (`create_verified_payout`)
+    5. Transaction Confirmation (`payout_batch_id`)
+    6. Persistent Audit Record (`write_audit_record`)
+
+    CRITICAL GUARANTEE:
+    - Never releases a payment without human authorization.
+    - Never returns `payout_released=True` or a mock transaction ID when an exception occurs.
     """
+    require_internal_service_secret(authorization)
+    if req.trust_score < req.threshold:
+        await write_audit_record(
+            actor=req.authorized_by or "policy_engine",
+            action="payment.threshold_rejected",
+            entity_type="milestone",
+            entity_id=req.milestone_id,
+            payload={"trust_score": req.trust_score, "threshold": req.threshold},
+        )
+        return ThresholdCheckResponse(
+            milestone_id=req.milestone_id,
+            trust_score=req.trust_score,
+            threshold_met=False,
+            payout_released=False,
+            payout_batch_id=None,
+            requires_human_authorization=True,
+            status="below_threshold",
+            message=(
+                f"Trust score {req.trust_score} is below required threshold {req.threshold}. "
+                "Payout withheld by deterministic policy."
+            ),
+        )
+
+    gross_cents = int(round(req.amount * 100))
+
+    # Stages 1 & 2: Run Finance Agent + Deterministic Policy Validation
+    f_req = FinanceAgentRequest(
+        project_id="proj-payout-check",
+        milestone_id=req.milestone_id,
+        milestone_title=f"Milestone {req.milestone_id}",
+        recipient_email=req.recipient_email,
+        gross_amount_cents=gross_cents,
+        currency=req.currency,
+        trust_score=req.trust_score,
+        all_criteria_passed=True,
+        head_sha_verified=True,
+    )
+    f_resp, _, _, _, _ = await execute_finance_agent(f_req)
+    proposal = f_resp.payment_proposal
+
+    if not proposal.policy_evaluation.passed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "Deterministic payment policy validation failed.",
+                "reasons": proposal.policy_evaluation.reasons,
+            },
+        )
+
+    # Stage 3: Human Authorization Gate
+    # If the request does not include an explicit human approval_id + authorized_by,
+    # return the PaymentProposal awaiting human authorization (NEVER transfer money autonomously).
+    if not req.approval_id or not req.authorized_by:
+        await write_audit_record(
+            actor="finance_agent",
+            action="payment.proposal_created",
+            entity_type="payment",
+            entity_id=proposal.proposal_id,
+            payload={
+                "milestone_id": req.milestone_id,
+                "gross_amount_cents": proposal.gross_amount_cents,
+                "net_amount_cents": proposal.net_amount_cents,
+                "status": "awaiting_human_authorization",
+            },
+        )
+        return ThresholdCheckResponse(
+            milestone_id=req.milestone_id,
+            trust_score=req.trust_score,
+            threshold_met=True,
+            payout_released=False,
+            payout_batch_id=None,
+            proposal_id=proposal.proposal_id,
+            requires_human_authorization=True,
+            status="awaiting_human_authorization",
+            message=(
+                f"Stage 1 & 2 passed. Payment proposal '{proposal.proposal_id}' created for "
+                f"${proposal.net_amount_cents / 100:.2f} {req.currency} net. "
+                "Awaiting Stage 3 explicit human authorization (approval_id & authorized_by) before PayPal execution."
+            ),
+        )
+
+    # Verify the authorizing actor is a human with role company/admin (never an AI agent)
+    require_human_authorization_actor(req.authorized_by, req.actor_role)
+
+    # Stage 4 & 5: Execute Real PayPal Payout & Confirm Batch ID
+    # Never catch and return fake success on failure!
     try:
-        # Run AI payout check
-        check = await run_payout_check(
-            milestone_id=body.milestone_id,
-            candidate_id=body.candidate_id,
-            budget_usd=body.budget_usd,
-            trust_score=body.trust_score,
-            tests_passing=body.tests_passing,
+        net_dollars = proposal.net_amount_cents / 100.0
+        payout_data = await create_verified_payout(
+            recipient_email=req.recipient_email,
+            amount_dollars=net_dollars,
+            currency=req.currency,
+            milestone_id=req.milestone_id,
+            approval_id=req.approval_id,
+            authorized_by=req.authorized_by,
         )
-
-        if not check.threshold_met:
-            # Update DB status to pending/failed
-            await update_milestone_status(body.milestone_id, "pending")
-            return ThresholdCheckResponse(
-                milestone_id=body.milestone_id,
-                threshold_met=False,
-                payout_released=False,
-                reason=check.reason,
-            )
-
-        # Threshold met — trigger PayPal payout
-        paypal_response = await release_milestone_payout(
-            recipient_email=body.recipient_email,
-            amount_usd=body.budget_usd,
-            milestone_id=body.milestone_id,
+        batch_id = payout_data.get("batch_header", {}).get("payout_batch_id")
+        if not batch_id:
+            raise PayPalAPIError("PayPal response did not include a confirmed payout_batch_id.")
+    except (PayPalConfigError, PayPalAPIError) as exc:
+        await write_audit_record(
+            actor=req.authorized_by,
+            action="payment.paypal_failed",
+            entity_type="milestone",
+            entity_id=req.milestone_id,
+            payload={"approval_id": req.approval_id, "error": str(exc)},
         )
-        batch_id = (
-            paypal_response
-            .get("batch_header", {})
-            .get("payout_batch_id")
-        )
-        await update_milestone_status(body.milestone_id, "payout_released", batch_id)
-        return ThresholdCheckResponse(
-            milestone_id=body.milestone_id,
-            threshold_met=True,
-            payout_released=True,
-            payout_batch_id=batch_id,
-            reason=f"Payout of ${body.budget_usd:.2f} USD released. Batch ID: {batch_id}",
-        )
-
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"PayPal transaction failed: {exc}. Payment was NOT released.",
+        ) from exc
     except Exception as exc:
-        logging.warning("check_payout_threshold fallback triggered: %s", exc)
-        return ThresholdCheckResponse(
-            milestone_id=body.milestone_id,
-            threshold_met=True,
-            payout_released=True,
-            payout_batch_id="MOCK_PAYOUT_BATCH_LOCAL",
-            reason="Payout threshold evaluated successfully (Fallback mode)",
+        await write_audit_record(
+            actor=req.authorized_by,
+            action="payment.unexpected_error",
+            entity_type="milestone",
+            entity_id=req.milestone_id,
+            payload={"approval_id": req.approval_id, "error": str(exc)},
         )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Unexpected error during payout execution: {exc}. Payment was NOT released.",
+        ) from exc
+
+    # Stage 6: Persistent Audit Record
+    await write_audit_record(
+        actor=req.authorized_by,
+        action="payment.payout_confirmed",
+        entity_type="payment",
+        entity_id=batch_id,
+        payload={
+            "milestone_id": req.milestone_id,
+            "approval_id": req.approval_id,
+            "proposal_id": proposal.proposal_id,
+            "gross_amount_cents": proposal.gross_amount_cents,
+            "platform_fee_cents": proposal.platform_fee_cents,
+            "net_amount_cents": proposal.net_amount_cents,
+            "paypal_batch_id": batch_id,
+        },
+    )
+
+    return ThresholdCheckResponse(
+        milestone_id=req.milestone_id,
+        trust_score=req.trust_score,
+        threshold_met=True,
+        payout_released=True,
+        payout_batch_id=batch_id,
+        proposal_id=proposal.proposal_id,
+        requires_human_authorization=True,
+        status="payout_released",
+        message=f"Human-authorized PayPal payout confirmed (Batch ID: {batch_id}).",
+    )
 
 
-# ---------------------------------------------------------------------------
-# Health check
-# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
 
-@app.get("/health", tags=["system"])
-async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "consultai-backend"}
+    port = int(os.getenv("PORT", "10000"))
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=port, reload=False)

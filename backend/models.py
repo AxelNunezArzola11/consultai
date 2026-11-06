@@ -1,97 +1,108 @@
-from __future__ import annotations
-
-from enum import Enum
-from typing import Optional
+"""
+Backward-compatible Pydantic models module (`backend.models`) + extended fields for
+Section 5 Financial & Security Policy enforcement.
+"""
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-class VettingStatus(str, Enum):
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    NEEDS_REVIEW = "needs_review"
+class GitHubRepoPayload(BaseModel):
+    full_name: str = Field(..., description="Full repository name, e.g., owner/repo")
+    html_url: str = Field(..., description="URL to the repository")
+
+
+class GitHubPullRequestPayload(BaseModel):
+    number: int
+    title: str
+    body: Optional[str] = ""
+    html_url: str
+    diff_url: str
+    state: str
+    merged: bool = False
+
+
+class GitHubWebhookPayload(BaseModel):
+    action: str
+    pull_request: Optional[GitHubPullRequestPayload] = None
+    repository: GitHubRepoPayload
+
+
+class PRVerificationResult(BaseModel):
+    trust_score: int = Field(
+        ...,
+        ge=0,
+        le=100,
+        description="Confidence score from 0 to 100 that the PR satisfies milestone deliverables",
+    )
+    verdict: Literal["approved", "needs_work", "rejected"]
+    summary: str = Field(..., description="Concise executive summary of the code review")
+    strengths: List[str] = Field(default_factory=list)
+    blocking_issues: List[str] = Field(default_factory=list)
+    recommended_payout_percentage: int = Field(..., ge=0, le=100)
 
 
 class CandidateVettingResult(BaseModel):
-    """Structured output from AI vetting of a candidate code submission."""
-
-    candidate_id: str = Field(..., description="Unique identifier for the candidate")
-    pr_number: int = Field(..., description="GitHub pull request number that was analyzed")
-    trust_score: float = Field(
-        ..., ge=0.0, le=100.0, description="Computed trust score from 0 to 100"
-    )
-    status: VettingStatus = Field(..., description="Overall vetting status determination")
-    code_quality_summary: str = Field(
-        ..., description="Brief summary of code quality observations"
-    )
-    security_flags: list[str] = Field(
-        default_factory=list, description="List of identified security concerns, if any"
-    )
-    test_coverage_estimate: Optional[float] = Field(
-        None, ge=0.0, le=100.0, description="Estimated unit test coverage percentage"
-    )
-    recommendations: list[str] = Field(
+    github_username: str
+    role_target: str
+    trust_score: int = Field(..., ge=0, le=100)
+    can_do: List[str] = Field(
         default_factory=list,
-        description="Actionable recommendations for the candidate",
+        description="Verified skills and capabilities backed by repository evidence",
     )
-
-
-class MilestoneStatus(str, Enum):
-    PENDING = "pending"
-    THRESHOLD_MET = "threshold_met"
-    PAYOUT_RELEASED = "payout_released"
-    FAILED = "failed"
-
-
-class MilestonePayoutCheck(BaseModel):
-    """Result of evaluating whether a milestone payout threshold has been met."""
-
-    milestone_id: str = Field(..., description="Unique identifier for the milestone")
-    candidate_id: str = Field(..., description="Candidate associated with the milestone")
-    budget_usd: float = Field(..., gt=0.0, description="Milestone budget in USD")
-    trust_score: float = Field(..., ge=0.0, le=100.0, description="Current trust score")
-    tests_passing: bool = Field(
-        ..., description="Whether all unit tests are currently passing"
+    cannot_do: List[str] = Field(
+        default_factory=list,
+        description="Required skills or domains lacking evidence or failing quality bar",
     )
-    threshold_met: bool = Field(
-        ...,
-        description="True when trust_score >= 75 and tests_passing is True",
-    )
-    status: MilestoneStatus = Field(..., description="Current milestone payout status")
-    paypal_payout_batch_id: Optional[str] = Field(
-        None, description="PayPal payout batch ID if payout was released"
-    )
-    reason: str = Field(..., description="Human-readable explanation of the status")
+    summary: str
 
 
-class RescheduleRisk(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
+class MilestoneNode(BaseModel):
+    id: str
+    name: str
+    start_date: str = Field(..., description="ISO-8601 date string YYYY-MM-DD")
+    end_date: str = Field(..., description="ISO-8601 date string YYYY-MM-DD")
+    dependencies: List[str] = Field(default_factory=list)
+    status: Literal["pending", "in_progress", "completed", "delayed", "funded", "paid"] = "pending"
 
 
-class MilestoneAdjustment(BaseModel):
+class GanttMutationPayload(BaseModel):
+    project_id: str
+    updated_milestones: List[MilestoneNode]
+    critical_path_shift_days: int
+    reason: str
+    requires_human_approval: bool = True
+
+
+class ThresholdCheckRequest(BaseModel):
     milestone_id: str
-    original_due_date: str = Field(..., description="ISO-8601 date string")
-    proposed_due_date: str = Field(..., description="ISO-8601 date string")
-    rationale: str
+    recipient_email: str
+    amount: float = Field(..., gt=0, description="Payout amount in USD")
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    trust_score: int = Field(..., ge=0, le=100)
+    threshold: int = Field(default=80, ge=0, le=100)
+    # Stage 3 Human Authorization fields required before executing an actual PayPal transfer:
+    approval_id: Optional[str] = Field(
+        default=None,
+        description="Verified human approval ID. If omitted, endpoint returns a PaymentProposal awaiting human authorization.",
+    )
+    authorized_by: Optional[str] = Field(
+        default=None,
+        description="Authenticated human actor who approved the payout (AI cannot authorize).",
+    )
+    actor_role: Literal["company", "admin"] = Field(default="company")
 
 
-class TimelineReschedulePlan(BaseModel):
-    """AI-generated plan for rescheduling project milestones based on current progress."""
-
-    project_id: str = Field(..., description="Unique project identifier")
-    overall_risk: RescheduleRisk = Field(
-        ..., description="Overall delivery risk assessment"
-    )
-    delay_days: int = Field(
-        ..., ge=0, description="Estimated total delay in calendar days"
-    )
-    adjustments: list[MilestoneAdjustment] = Field(
-        default_factory=list, description="Per-milestone schedule adjustments"
-    )
-    executive_summary: str = Field(
-        ..., description="One-paragraph executive summary of the reschedule plan"
-    )
-    blockers: list[str] = Field(
-        default_factory=list, description="Key blockers causing the delay"
-    )
+class ThresholdCheckResponse(BaseModel):
+    milestone_id: str
+    trust_score: int
+    threshold_met: bool
+    payout_released: bool
+    payout_batch_id: Optional[str] = None
+    proposal_id: Optional[str] = None
+    requires_human_authorization: bool = True
+    status: Literal[
+        "below_threshold",
+        "awaiting_human_authorization",
+        "payout_released",
+    ] = "awaiting_human_authorization"
+    message: str

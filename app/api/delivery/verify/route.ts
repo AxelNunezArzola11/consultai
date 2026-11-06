@@ -60,6 +60,7 @@ import {
   getAutoReleaseLimitUsd,
   type PolicyFlag,
 } from "@/lib/delivery/policy-engine";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
 
@@ -137,22 +138,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // ── Load milestone + project ──────────────────────────────────────────
-    const [milestone] = await db
-      .select()
-      .from(milestones)
-      .where(eq(milestones.id, milestoneId))
-      .limit(1);
+    const demoTables = isDemoMode() ? (await import("@/lib/demo/store")).getDemoTables() : null;
+    const milestone = demoTables
+      ? demoTables.milestones.find((m) => m.id === milestoneId)
+      : (
+          await db
+            .select()
+            .from(milestones)
+            .where(eq(milestones.id, milestoneId))
+            .limit(1)
+        )[0];
 
     if (!milestone) {
       return NextResponse.json({ error: "Milestone not found" }, { status: 404 });
     }
 
     // Load acceptance criteria from project
-    const [project] = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, milestone.projectId))
-      .limit(1);
+    const project = demoTables
+      ? demoTables.projects.find((p) => p.id === milestone.projectId)
+      : (
+          await db
+            .select()
+            .from(projects)
+            .where(eq(projects.id, milestone.projectId))
+            .limit(1)
+        )[0];
 
     const criteria: AcceptanceCriterion[] = Array.isArray(project?.acceptanceCriteria)
       ? (project.acceptanceCriteria as AcceptanceCriterion[])
@@ -162,12 +172,112 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let parsedPr: { owner: string; repo: string; number: number };
     try {
       parsedPr = parsePrUrl(prUrl);
-      validateRepo(parsedPr.owner, parsedPr.repo);
+      if (!demoTables) validateRepo(parsedPr.owner, parsedPr.repo);
     } catch (err) {
       return NextResponse.json(
         { error: (err as Error).message },
         { status: 400 }
       );
+    }
+
+    // ── Demo mode: simulated verification (no GitHub, no LLM) ─────────────
+    // Objective criteria are marked met with simulated evidence; the REAL
+    // policy engine still renders the decision. Everything is labeled simulated.
+    if (demoTables) {
+      const { appendDemoAudit } = await import("@/lib/demo/store");
+      const runId = `demo-run-${nanoid(8)}`;
+      const headSha = `demoheadsha${String(parsedPr.number).padStart(8, "0")}00000000000000000000`.slice(0, 40);
+      const criteriaResults = criteria.map((c) => ({
+        criterionId: c.id,
+        kind: "objective" as const,
+        met: true as boolean | null,
+        evidence: [`simulated check passed for "${c.description.slice(0, 80)}"`],
+      }));
+      const amountUsd = parseFloat(milestone.budgetUsd ?? "0");
+      const policyOutput = evaluatePolicy({
+        criteriaResults,
+        flags: [] as PolicyFlag[],
+        amountUsd,
+        autoReleaseLimitUsd: getAutoReleaseLimitUsd(),
+        shaMatches: true,
+      });
+      const proposalId = `demo-prop-${nanoid(8)}`;
+      const now = new Date();
+      demoTables.verificationRuns.unshift({
+        id: runId,
+        milestoneId,
+        prUrl,
+        prOwner: parsedPr.owner,
+        prRepo: parsedPr.repo,
+        prNumber: parsedPr.number,
+        headSha,
+        prAuthor: expectedAuthor ?? "demo-contributor",
+        prMerged: false,
+        prDraft: false,
+        criteriaResults,
+        flags: [],
+        llmModelId: "simulated-demo-model",
+        promptVersion: "demo-v1",
+        durationMs: 900,
+        policyDecision: policyOutput.decision,
+        justification: `SIMULATED verification of PR #${parsedPr.number}: all ${criteriaResults.length} criteria checks passed against fictional evidence. Policy decision rendered by the real policy engine.`,
+        justificationFallback: false,
+        status: "completed",
+        submittedBy: role,
+        createdAt: now,
+        updatedAt: now,
+      });
+      demoTables.paymentProposals.unshift({
+        id: proposalId,
+        milestoneId,
+        runId,
+        boundHeadSha: headSha,
+        amountUsd: amountUsd.toFixed(2),
+        policyDecision: policyOutput.decision,
+        justification: "Simulated proposal — human approval still required.",
+        justificationFallback: false,
+        status:
+          policyOutput.decision === "AUTO_RELEASE_ELIGIBLE"
+            ? "auto_release_eligible"
+            : policyOutput.decision === "REJECT_RECOMMENDED"
+              ? "reject_recommended"
+              : "requires_approval",
+        decidedBy: null,
+        decidedAt: null,
+        decisionNotes: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      if (milestone.status === "funded" || milestone.status === "submitted") {
+        milestone.status = "verifying";
+        milestone.updatedAt = now;
+      }
+      appendDemoAudit({
+        entityType: "milestone",
+        entityId: milestoneId,
+        event: "DELIVERY_VERIFIED",
+        actor: role,
+        payload: { runId, proposalId, prUrl, policyDecision: policyOutput.decision },
+      });
+      return NextResponse.json({
+        status: "ok",
+        runId,
+        proposalId,
+        policyDecision: policyOutput.decision,
+        reasons: policyOutput.reasons,
+        headSha: headSha.substring(0, 8),
+        justification: `SIMULATED verification of PR #${parsedPr.number} (no GitHub or LLM contacted).`,
+        justificationFallback: false,
+        flags: [],
+        criteriaResults,
+        steps: [
+          { seq: 0, tool: "fetchPRDetails", output: `Simulated fetch of ${parsedPr.owner}/${parsedPr.repo}#${parsedPr.number}` },
+          { seq: 1, tool: "verifyAcceptanceCriteria", output: `${criteriaResults.length} simulated checks passed` },
+          { seq: 2, tool: "policyEngine", output: `Decision: ${policyOutput.decision}` },
+        ],
+        durationMs: 900,
+        simulated: true,
+      });
     }
 
     // Create the verification run row (status=running)

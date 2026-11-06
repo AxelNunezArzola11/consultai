@@ -15,6 +15,8 @@ import { db } from "@/lib/db";
 import { disputes } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { writeAuditLog } from "@/lib/db/audit";
+import { isDemoMode } from "@/lib/demo/config";
+import { getRoleFromCookie } from "@/lib/auth/role-cookie";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +28,55 @@ export async function POST(
 
   if (!disputeId) {
     return NextResponse.json({ error: "missing disputeId" }, { status: 400 });
+  }
+
+  const role = await getRoleFromCookie(req.headers.get("cookie"));
+  if (role !== "company" && role !== "admin") {
+    return NextResponse.json(
+      { error: "Forbidden: dispute analysis requires the company or admin role." },
+      { status: 403 }
+    );
+  }
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const dispute = getDemoTables().disputes.find((d) => d.id === disputeId);
+    if (!dispute) {
+      return NextResponse.json({ error: "dispute not found" }, { status: 404 });
+    }
+    const proposal = {
+      proposedAction: "PROVIDE_EVIDENCE",
+      proposedOfferAmountUsd: null,
+      writtenResponse:
+        "SIMULATED dispute analysis: delivery evidence (approved mockups v3 + PR #87 diff) " +
+        "supports requesting a revised delivery before any payout release. Human decision required.",
+      reasoning: "Deterministic simulated assessment over fictional evidence — no live LLM ran.",
+      confidence: 0.72,
+      simulated: true,
+    };
+    dispute.agentResolution = JSON.stringify({ ...proposal, analyzedAt: new Date().toISOString() });
+    dispute.updatedAt = new Date();
+    await writeAuditLog({
+      entityType: "dispute",
+      entityId: disputeId,
+      event: "DISPUTE_AGENT_ANALYZED",
+      actor: "agent",
+      payload: { proposedAction: proposal.proposedAction, confidence: proposal.confidence },
+    });
+    return NextResponse.json({
+      status: "ok",
+      proposal,
+      evidencePacket: {
+        isComplete: true,
+        missingRequired: [],
+        hasVerificationRun: false,
+        hasApproval: false,
+        hasPayout: false,
+      },
+      fallback: false,
+      durationMs: 300,
+      simulated: true,
+    });
   }
 
   // Build evidence packet
@@ -94,6 +145,15 @@ export async function GET(
   { params }: { params: Promise<{ disputeId: string }> }
 ): Promise<NextResponse> {
   const { disputeId } = await params;
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const dispute = getDemoTables().disputes.find((d) => d.id === disputeId);
+    if (!dispute) {
+      return NextResponse.json({ error: "dispute not found" }, { status: 404 });
+    }
+    return NextResponse.json({ dispute });
+  }
 
   const rows = await db
     .select()

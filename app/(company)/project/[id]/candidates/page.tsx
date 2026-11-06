@@ -21,6 +21,11 @@ import { candidates, ndas, meetings, cascadeLog } from "@/lib/db/schema";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { lazyExpireNdas, lazyCheckNoShows } from "@/lib/scheduling/lazy-checks";
+import { NdaGenerateButton } from "@/components/candidates/NdaGenerateButton";
+import { CandidateDemoControls } from "@/components/candidates/CandidateDemoControls";
+import { PipelinePoller } from "@/components/candidates/PipelinePoller";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 // ---------------------------------------------------------------------------
 // Pipeline column config
@@ -59,23 +64,31 @@ interface Props {
 
 export default async function CandidatePipelinePage({ params }: Props) {
   const { id: projectId } = await params;
+  const demoTables = isDemoMode() ? getDemoTables() : null;
 
-  // Lazy expiry checks on every page load
-  await Promise.allSettled([
-    lazyExpireNdas(projectId),
-    lazyCheckNoShows(projectId),
-  ]);
+  // Lazy expiry checks on every page load (live database only)
+  if (!demoTables) {
+    await Promise.allSettled([
+      lazyExpireNdas(projectId),
+      lazyCheckNoShows(projectId),
+    ]);
+  }
 
-  const allCandidates = await db
-    .select()
-    .from(candidates)
-    .where(eq(candidates.projectId, projectId))
-    .orderBy(candidates.rank);
+  const allCandidates = demoTables
+    ? demoTables.candidates
+        .filter((c) => c.projectId === projectId)
+        .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99))
+    : await db
+        .select()
+        .from(candidates)
+        .where(eq(candidates.projectId, projectId))
+        .orderBy(candidates.rank);
 
   // Fetch NDAs for expiry display
   const candidateIds = allCandidates.map((c) => c.id);
-  const ndaList =
-    candidateIds.length > 0
+  const ndaList = demoTables
+    ? demoTables.ndas.filter((n) => candidateIds.includes(n.candidateId))
+    : candidateIds.length > 0
       ? await db
           .select()
           .from(ndas)
@@ -87,8 +100,9 @@ export default async function CandidatePipelinePage({ params }: Props) {
   );
 
   // Fetch meetings
-  const meetingList =
-    candidateIds.length > 0
+  const meetingList = demoTables
+    ? demoTables.meetings.filter((m) => candidateIds.includes(m.candidateId))
+    : candidateIds.length > 0
       ? await db
           .select()
           .from(meetings)
@@ -107,13 +121,16 @@ export default async function CandidatePipelinePage({ params }: Props) {
     byStatus.get(key)!.push(c);
   }
 
-  const isDemoMode = process.env.DEMO_MODE === "true" || process.env.NODE_ENV === "development";
+  const { areDemoWriteControlsEnabled } = await import("@/lib/demo/config");
+  const showDemoControls = areDemoWriteControlsEnabled();
 
   // Count cascade rounds
-  const cascadeLogs = await db
-    .select()
-    .from(cascadeLog)
-    .where(eq(cascadeLog.projectId, projectId));
+  const cascadeLogs = demoTables
+    ? demoTables.cascadeLog.filter((l) => l.projectId === projectId)
+    : await db
+        .select()
+        .from(cascadeLog)
+        .where(eq(cascadeLog.projectId, projectId));
 
   return (
     <div className="px-6 py-8 space-y-8">
@@ -171,7 +188,7 @@ export default async function CandidatePipelinePage({ params }: Props) {
                       candidate={c}
                       nda={ndaByCandidate[c.id]}
                       meeting={meetingByCandidate[c.id]}
-                      isDemoMode={isDemoMode}
+                      isDemoMode={showDemoControls}
                       projectId={projectId}
                     />
                   ))}
@@ -261,12 +278,19 @@ export default async function CandidatePipelinePage({ params }: Props) {
       )}
 
       {/* Demo controls */}
-      {isDemoMode && (
-        <DemoControlsSection projectId={projectId} candidates={allCandidates} />
+      {showDemoControls && (
+        <CandidateDemoControls
+          projectId={projectId}
+          ndaSentCandidates={allCandidates
+            .filter((c) => c.status === "nda_sent")
+            .map((c) => ({ id: c.id, name: c.name }))}
+          bookedCandidates={allCandidates
+            .filter((c) => c.status === "booked" || c.status === "scheduled")
+            .map((c) => ({ id: c.id, name: c.name }))}
+        />
       )}
 
-      {/* Auto-refresh script */}
-      <AutoRefresh intervalMs={3000} />
+      <PipelinePoller intervalMs={3000} />
     </div>
   );
 }
@@ -317,6 +341,18 @@ function CandidateCard({
           })}
         </p>
       )}
+      {(candidate.status === "pending" || candidate.status === "shortlisted") && (
+        <NdaGenerateButton
+          candidateId={candidate.id}
+          projectId={projectId}
+          candidateName={candidate.name}
+        />
+      )}
+      {candidate.status === "nda_sent" && (
+        <p className="text-muted-foreground">
+          NDA sent — issue its link from the demo inbox.
+        </p>
+      )}
     </div>
   );
 }
@@ -331,93 +367,4 @@ function formatRelativeTime(date: Date): string {
   return `${Math.floor(hrs / 24)}d`;
 }
 
-// ---------------------------------------------------------------------------
-// Demo controls (DEMO_MODE only)
-// ---------------------------------------------------------------------------
 
-function DemoControlsSection({
-  projectId,
-  candidates: allCandidates,
-}: {
-  projectId: string;
-  candidates: Array<{ id: string; name: string; status: string }>;
-}) {
-  const ndaSentCandidates = allCandidates.filter((c) => c.status === "nda_sent");
-  const bookedCandidates = allCandidates.filter(
-    (c) => c.status === "booked" || c.status === "scheduled"
-  );
-
-  return (
-    <div className="rounded-lg border border-orange-800/60 bg-orange-950/40 p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <Badge variant="destructive" className="text-xs">DEMO ONLY</Badge>
-        <h2 className="text-sm font-semibold">Demo Controls</h2>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        These buttons simulate real events for demonstration. Disabled in production.
-      </p>
-      <div className="flex flex-wrap gap-2">
-        {ndaSentCandidates.map((c) => (
-          <DemoButton
-            key={c.id}
-            label={`Simulate NDA Signed: ${c.name}`}
-            apiPath="/api/demo/simulate-nda-signed"
-            payload={{ candidateId: c.id, projectId }}
-          />
-        ))}
-        {bookedCandidates.map((c) => (
-          <DemoButton
-            key={c.id}
-            label={`Simulate Cancellation: ${c.name}`}
-            apiPath="/api/demo/simulate-cancellation"
-            payload={{ candidateId: c.id, projectId }}
-          />
-        ))}
-        {ndaSentCandidates.length === 0 && bookedCandidates.length === 0 && (
-          <p className="text-xs text-muted-foreground">
-            No candidates in NDA_SENT or BOOKED state to simulate.
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Client component stub for demo buttons — rendered server-side as form submissions
-function DemoButton({
-  label,
-  apiPath,
-  payload,
-}: {
-  label: string;
-  apiPath: string;
-  payload: Record<string, string>;
-}) {
-  return (
-    <form action={apiPath} method="POST">
-      {Object.entries(payload).map(([k, v]) => (
-        <input key={k} type="hidden" name={k} value={v} />
-      ))}
-      <button
-        type="submit"
-        className="text-xs rounded border border-orange-400 bg-orange-100 dark:bg-orange-900 hover:bg-orange-200 dark:hover:bg-orange-800 px-3 py-1.5 transition-colors"
-      >
-        {label}
-      </button>
-    </form>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Auto-refresh — meta refresh for server components (no client JS needed)
-// ---------------------------------------------------------------------------
-
-function AutoRefresh({ intervalMs }: { intervalMs: number }) {
-  return (
-    <div className="text-xs text-muted-foreground text-center">
-      <span>Pipeline auto-refreshes every {intervalMs / 1000}s</span>
-      {/* eslint-disable-next-line @next/next/no-head-element */}
-      {/* Note: real polling is handled by the useSSE hook in client components */}
-    </div>
-  );
-}

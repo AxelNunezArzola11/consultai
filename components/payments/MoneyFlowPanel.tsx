@@ -83,6 +83,8 @@ interface Props {
   initialNetUsd:   string | null;
   initialCurrency: string | null;
   initialAudit:    AuditEntry[];
+  /** When set, funding is disabled with this honest explanation (e.g. demo mode). */
+  fundingDisabledReason?: string;
 }
 
 // ── Stage helpers ────────────────────────────────────────────────────────────
@@ -144,6 +146,7 @@ export function MoneyFlowPanel({
   initialNetUsd,
   initialCurrency,
   initialAudit,
+  fundingDisabledReason,
 }: Props) {
   const [state, setState] = useState<MilestoneState>({
     milestoneId,
@@ -424,12 +427,18 @@ export function MoneyFlowPanel({
           <p className="text-xs text-muted-foreground">
             Budget: <strong className="text-foreground">${Number(budgetUsd).toLocaleString()} USD</strong>
           </p>
+          {fundingDisabledReason ? (
+            <p className="rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 text-xs text-sky-800 dark:bg-sky-950 dark:text-sky-200">
+              {fundingDisabledReason}
+            </p>
+          ) : (
           <MilestoneFundButton
             milestoneId={milestoneId}
             milestoneTitle={milestoneTitle}
             budgetUsd={budgetUsd}
             onFunded={handleFunded}
           />
+          )}
         </div>
       )}
 

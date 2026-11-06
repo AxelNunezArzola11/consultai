@@ -9,17 +9,21 @@
  * Seed contents:
  * - 1 company (Acme Corp)
  * - 1 active project (AI Dashboard Rebuild) with 3 acceptance criteria
- * - 3 milestones
+ * - 3 milestones (milestone-2 funded with simulated capture)
  * - 3 candidates (rank 1–3) with trust scores, can/cannot-do arrays
  * - 3 evidence rows
- * - 1 NDA for candidate-1 (status: sent, with invite token)
+ * - 1 NDA for candidate-1 (status: sent, Phase 4 hashed invite token —
+ *   the invite URL is printed ONCE when first created)
  * - 1 meeting for candidate-1 (status: scheduled)
- * - 2 audit_log entries
+ * - 1 pending payment + approval for milestone-2 (human authorization demo)
+ * - 1 internal dispute for milestone-2 (dispute management demo)
+ * - 4 audit_log entries
  */
 
 // Load .env.local for local runs
 import "dotenv/config";
 
+import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   companies,
@@ -29,12 +33,22 @@ import {
   evidence,
   ndas,
   meetings,
+  payments,
+  approvals,
+  disputes,
   auditLog,
 } from "@/lib/db/schema";
+import { buildNdaText } from "@/lib/nda/generate";
+import {
+  generateInviteToken,
+  hashInviteToken,
+  sha256Hex,
+  tokenExpiresAt,
+  ndaExpiresAt,
+} from "@/lib/nda/invite-token";
 
 const now = new Date();
 const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-const in48h = new Date(now.getTime() + 48 * 60 * 60 * 1000);
 
 async function seed() {
   console.log("🌱 Seeding demo data...");
@@ -307,23 +321,45 @@ async function seed() {
     .onConflictDoNothing();
 
   // -------------------------------------------------------------------------
-  // NDA for candidate-1 (status: sent)
+  // NDA for candidate-1 (status: sent, Phase 4 secure token)
   // -------------------------------------------------------------------------
-  await db
-    .insert(ndas)
-    .values({
+  // The raw token is hashed before storage and printed ONCE below. Re-runs
+  // keep the existing row; operators can reissue a link via the demo inbox.
+  const [existingNda] = await db
+    .select({ id: ndas.id })
+    .from(ndas)
+    .where(eq(ndas.id, "nda-1"))
+    .limit(1);
+
+  let seedInvitePath: string | null = null;
+  if (!existingNda) {
+    const rawToken = generateInviteToken();
+    const documentText = buildNdaText({
+      projectTitle: "AI Dashboard Rebuild",
+      companyName: "Acme Corp",
+      candidateName: "Alex Rivera",
+      date: now.toISOString().split("T")[0],
+    });
+    const documentHash = sha256Hex(documentText);
+    await db.insert(ndas).values({
       id: "nda-1",
       candidateId: "candidate-1",
       projectId: "project-1",
-      templateVersion: "v1.0",
-      contentHash:
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // placeholder SHA-256
-      inviteToken: "demo-invite-token-1",
+      templateVersion: "1.0.0",
+      contentHash: documentHash,
+      documentHash,
+      pdfUrl: null,
+      inviteToken: null,
+      inviteTokenHash: hashInviteToken(rawToken),
+      inviteTokenUsed: false,
+      inviteTokenRateLimit: 0,
+      inviteTokenExpiresAt: tokenExpiresAt(),
       status: "sent",
       sentAt: now,
-      expiresAt: in48h,
-    })
-    .onConflictDoNothing();
+      expiresAt: ndaExpiresAt(),
+    });
+    seedInvitePath = `/invite/nda-1:${rawToken}`;
+  }
 
   // -------------------------------------------------------------------------
   // Meeting for candidate-1 (status: scheduled)
@@ -341,7 +377,75 @@ async function seed() {
     .onConflictDoNothing();
 
   // -------------------------------------------------------------------------
-  // Audit log (2 seed entries)
+  // Pending payment + approval for milestone-2 (human authorization demo)
+  // -------------------------------------------------------------------------
+  await db
+    .insert(payments)
+    .values({
+      id: "payment-2",
+      milestoneId: "milestone-2",
+      candidateId: "candidate-1",
+      grossUsd: "1500.00",
+      feeUsd: "58.50",
+      netUsd: "1441.50",
+      currency: "USD",
+      paypalOrderId: "DEMO-ORDER-001",
+      paypalCaptureId: "DEMO-CAPTURE-001",
+      senderBatchId: "PAY_payment-2",
+      idempotencyKey: "seed-idem-payment-2",
+      status: "pending",
+      justification:
+        "Backend API milestone accepted pending human payout authorization (seeded demo).",
+    })
+    .onConflictDoNothing();
+
+  await db
+    .insert(approvals)
+    .values({
+      id: "approval-1",
+      paymentId: "payment-2",
+      milestoneId: "milestone-2",
+      requestedBy: "agent",
+      decision: "pending",
+      notes:
+        "Amount $1,441.50 exceeds the $500 auto-approve threshold — seeded for the approval demo.",
+    })
+    .onConflictDoNothing();
+
+  // -------------------------------------------------------------------------
+  // Internal dispute for milestone-2 (dispute management demo)
+  // -------------------------------------------------------------------------
+  await db
+    .insert(disputes)
+    .values({
+      id: "dispute-1",
+      milestoneId: "milestone-2",
+      paymentId: "payment-2",
+      paypalDisputeId: null,
+      status: "open",
+      claimedBy: "company",
+      disputeReason: "MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED",
+      disputeChannel: "INTERNAL",
+      disputeLifeCycleStage: "INQUIRY",
+      disputeAmountUsd: "500.00",
+      disputeAmountCurrency: "USD",
+      evidence: [
+        {
+          type: "acceptance_criteria",
+          description:
+            "ac-3 requires PayPal sync within 60s; seeded delivery report shows 4-minute lag (fictional).",
+          source: "project_brief",
+        },
+      ],
+      evidenceStatus: "submitted",
+      evidenceSubmittedAt: now,
+      agentResolution:
+        "Seeded advisory: request a revised delivery addressing the sync lag before payout release. Human decides.",
+    })
+    .onConflictDoNothing();
+
+  // -------------------------------------------------------------------------
+  // Audit log (4 seed entries)
   // -------------------------------------------------------------------------
   await db
     .insert(auditLog)
@@ -360,12 +464,34 @@ async function seed() {
         actor: "system",
         payload: { ndaId: "nda-1", candidateName: "Alex Rivera" },
       },
+      {
+        entityType: "payment",
+        entityId: "payment-2",
+        event: "PAYOUT_PROPOSED",
+        actor: "agent",
+        payload: { amountUsd: "1441.50" },
+      },
+      {
+        entityType: "dispute",
+        entityId: "dispute-1",
+        event: "DISPUTE_OPENED",
+        actor: "system",
+        payload: { amountUsd: "500.00" },
+      },
     ])
     // audit_log uses bigserial PK — no conflict expected, but safe to ignore on re-run
     .onConflictDoNothing();
 
   console.log("✅ Seed complete.");
-  console.log("   company-1, project-1, 3 milestones, 3 candidates, nda-1, meeting-1");
+  console.log("   company-1, project-1, 3 milestones, 3 candidates, nda-1, meeting-1,");
+  console.log("   payment-2 + approval-1 (pending), dispute-1 (open)");
+  if (seedInvitePath) {
+    console.log("");
+    console.log("   NDA invite for Alex Rivera (shown ONCE — the raw token is not stored):");
+    console.log(`   ${seedInvitePath}`);
+  } else {
+    console.log("   nda-1 already existed — reissue its link from /demo-inbox if needed.");
+  }
 }
 
 seed().catch((err) => {

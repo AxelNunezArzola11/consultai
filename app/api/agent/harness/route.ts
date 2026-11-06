@@ -36,6 +36,7 @@ import { streamText, tool, zodSchema, convertToModelMessages, createUIMessageStr
 import { createGroq } from "@ai-sdk/groq";
 import { z } from "zod";
 import { NextRequest } from "next/server";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const runtime = "nodejs";
 export const maxDuration = 25;
@@ -244,7 +245,23 @@ interface MockContent {
   toolResult: Record<string, unknown> | null;
 }
 
+/**
+ * Honesty wrapper: every mock/simulation path is explicitly labeled so a
+ * failed live integration is NEVER presented as a real agent execution.
+ */
 function buildMockChunks(userText: string, projectId: string): MockContent {
+  const mock = buildMockChunksRaw(userText, projectId);
+  return {
+    assistantText:
+      "SIMULATED RESPONSE — no live AI ran for this message. " +
+      mock.assistantText,
+    toolResult: mock.toolResult
+      ? { ...mock.toolResult, simulated: true }
+      : null,
+  };
+}
+
+function buildMockChunksRaw(userText: string, projectId: string): MockContent {
   const lower = userText.toLowerCase();
   const isReschedule = /re.?level|hr.*week|week.*hr|shift|reschedul|timeline|capacity/i.test(lower);
   const isFilter     = /filter|trust|score|skill|shortlist/i.test(lower);
@@ -389,6 +406,10 @@ export async function POST(req: NextRequest) {
   // mismatch, network timeout) falls through to buildMockStream so useChat
   // never receives a non-200 response and never fires onError.
   try {
+    // Demo mode → deterministic labeled simulation (never contacts Groq or the DB)
+    if (isDemoMode()) {
+      return buildMockStream(lastUserText, projectId);
+    }
     // No key → deterministic mock immediately
     if (!process.env.GROQ_API_KEY) {
       console.warn("[Harness Route] Falling back to mock stream: GROQ_API_KEY not set");

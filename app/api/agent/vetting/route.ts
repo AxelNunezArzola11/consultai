@@ -31,6 +31,7 @@ import { eq, and } from "drizzle-orm";
 import { runVetting } from "@/lib/vetting/orchestrator";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
 import { requirementsFromProject } from "@/lib/vetting/requirements-from-project";
+import { isDemoMode } from "@/lib/demo/config";
 
 export async function POST(request: NextRequest) {
   // Role check
@@ -52,6 +53,87 @@ export async function POST(request: NextRequest) {
       { error: "candidateId and projectId are required" },
       { status: 400 }
     );
+  }
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const {
+      computeTrustScore,
+      buildMatrix,
+      buildScoreBreakdown,
+    } = await import("@/lib/vetting/signals");
+    const t = getDemoTables();
+    const candidate = t.candidates.find(
+      (c) => c.id === candidateId && c.projectId === projectId
+    );
+    if (!candidate) {
+      return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
+    }
+    if (!candidate.vettingConsentAt) {
+      return NextResponse.json(
+        {
+          error: "Candidate has not given vetting consent",
+          humanReviewNotice:
+            "A candidate must give in-app consent before vetting begins.",
+        },
+        { status: 403 }
+      );
+    }
+    const project = t.projects.find((p) => p.id === projectId);
+    if (!project) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    // Deterministic simulated run over the fixture signals — same scoring code.
+    const demoSignals = t.signals
+      .filter((s) => s.candidateId === candidateId)
+      .map((s) => ({
+        id: s.id,
+        candidateId: s.candidateId,
+        requirementId: s.requirementId,
+        signalType: s.signalType as
+          | "github_repo"
+          | "github_pr"
+          | "portfolio"
+          | "public_review"
+          | "provided_link",
+        sourceUrl: s.sourceUrl,
+        retrievedAt: s.retrievedAt.toISOString(),
+        contentHash: s.contentHash,
+        extractedFact: s.extractedFact,
+        quotedExcerpt: s.quotedExcerpt,
+        confidence: parseFloat(s.confidence),
+      }));
+    const requirements = requirementsFromProject(project);
+    const trustScore = computeTrustScore(demoSignals);
+    candidate.trustScore = trustScore.toFixed(2);
+    candidate.vettingRanAt = new Date();
+    candidate.updatedAt = new Date();
+    return NextResponse.json({
+      humanReviewNotice:
+        "SIMULATED vetting run over fictional demo signals. It is intended to assist your " +
+        "decision-making, not replace it. The company always makes the final hiring decision.",
+      scoringFormula:
+        "Trust score = Σ(signal_weight × confidence) / Σ(signal_weight), clamped to [0,1], rounded to 2dp. " +
+        "Weights: github_repo=0.35, github_pr=0.30, portfolio=0.20, public_review=0.10, provided_link=0.05.",
+      candidateId,
+      trustScore,
+      scoreBreakdown: buildScoreBreakdown(demoSignals),
+      matrix: buildMatrix(requirements, demoSignals),
+      signalCount: demoSignals.length,
+      fabricatedDropped: 0,
+      usedFallback: false,
+      errors: [],
+      simulated: true,
+      debugPayload: {
+        requirementsSent: requirements,
+        debugLog: [
+          {
+            source: "demo-fixtures",
+            note: "Deterministic simulated run — no external fetch, no live LLM.",
+          },
+        ],
+      },
+    });
   }
 
   // Validate candidate belongs to project

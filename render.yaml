@@ -5,17 +5,32 @@ services:
     region: oregon
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 65 --timeout-graceful-shutdown 25
+    healthCheckPath: /health
     envVars:
       - key: GROQ_API_KEY
         sync: false
       - key: NEON_DATABASE_URL
         sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: PAYPAL_ENV
+        value: "sandbox"
+      - key: ALLOW_LIVE
+        value: "false"
+      - key: PAYPAL_BASE_URL
+        value: "https://api-m.sandbox.paypal.com"
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_CLIENT_SECRET
         sync: false
+      - key: GITHUB_TOKEN
+        sync: false
       - key: GITHUB_WEBHOOK_SECRET
         sync: false
+      - key: INTERNAL_API_SECRET
+        sync: false
+      - key: CORS_ALLOW_ORIGINS
+        value: "https://consultai-rho.vercel.app,http://localhost:3000"
       - key: PYTHON_VERSION
-        value: "3.11.0"
+        value: "3.11.4"

@@ -23,13 +23,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq, and } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { ndas, candidates } from "@/lib/db/schema";
+import { ndas, candidates, meetings } from "@/lib/db/schema";
 import { validateInviteToken } from "@/lib/nda/invite-token";
 import {
   assertCandidateTransition,
   CandidateTransitionError,
 } from "@/lib/state-machines/candidate-pipeline";
 import { writeAuditLog } from "@/lib/db/audit";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +61,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (typeof agreed !== "boolean" || !agreed) {
     return OPAQUE_ERROR;
+  }
+
+  if (isDemoMode()) {
+    const { acceptDemoNda, getDemoTables } = await import("@/lib/demo/store");
+    const colon = (token as string).indexOf(":");
+    const ndaId = colon >= 0 ? (token as string).slice(0, colon) : "";
+    const raw = colon >= 0 ? (token as string).slice(colon + 1) : "";
+    const outcome = acceptDemoNda(ndaId, raw, (typedName as string).trim(), documentHash as string);
+    if (outcome !== "ok") {
+      if (outcome === "used") {
+        return NextResponse.json({ error: "already_accepted" }, { status: 409 });
+      }
+      return outcome === "hash_mismatch"
+        ? NextResponse.json({ error: "document_mismatch" }, { status: 400 })
+        : OPAQUE_ERROR;
+    }
+    const t = getDemoTables();
+    const nda = t.ndas.find((n) => n.id === ndaId)!;
+    const meeting = t.meetings.find((m) => m.candidateId === nda.candidateId);
+    return NextResponse.json({
+      status: "accepted",
+      candidateId: nda.candidateId,
+      projectId: nda.projectId,
+      bookingUnlocked: true,
+      bookingUrl: meeting?.bookingLink ?? null,
+      simulated: true,
+    });
   }
 
   // Look up NDA by token hash would require a hash lookup. Since we do rate-limit
@@ -198,10 +226,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     },
   });
 
+  const [meeting] = await db
+    .select({ bookingLink: meetings.bookingLink })
+    .from(meetings)
+    .where(eq(meetings.candidateId, nda.candidateId))
+    .limit(1);
+
   return NextResponse.json({
     status: "accepted",
     candidateId: nda.candidateId,
     projectId: nda.projectId,
     bookingUnlocked: true,
+    bookingUrl: meeting?.bookingLink ?? null,
   });
 }

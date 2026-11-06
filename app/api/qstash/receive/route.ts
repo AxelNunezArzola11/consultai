@@ -80,6 +80,11 @@ function verifyQStashSignature(rawBody: string, signatureHeader: string | null):
 // ---------------------------------------------------------------------------
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const { isDemoMode: isDemo } = await import("@/lib/demo/config");
+  if (isDemo()) {
+    const { demoBlocked } = await import("@/lib/demo/guard");
+    return demoBlocked("QStash callbacks");
+  }
   const rawBody = await req.text();
   const signature = req.headers.get("upstash-signature");
   const messageId = req.headers.get("upstash-message-id") ?? "";

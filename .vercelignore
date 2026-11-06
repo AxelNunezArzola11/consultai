@@ -1,0 +1,10 @@
+# Vercel deployment ignore list — additive only, no app behavior change.
+# The Python FastAPI backend deploys to Render (see render.yaml), not Vercel,
+# so the local venv and bytecode caches must not be uploaded with the frontend.
+vconsult/
+backend/__pycache__/
+backend/**/__pycache__/
+**/*.pyc
+.next/
+test-results/
+tests/

@@ -19,6 +19,8 @@ import { eq, sql, inArray } from "drizzle-orm";
 import { CandidatesVettingClient } from "./CandidatesVettingClient";
 import { VettingAIHarness } from "@/components/agent/VettingAIHarness";
 import { requirementsFromProject } from "@/lib/vetting/requirements-from-project";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 interface Props {
   params: Promise<{ id: string }>;
@@ -29,12 +31,17 @@ export default async function CandidatesVettingPage({ params, searchParams }: Pr
   const { id: projectId } = await params;
   const resolvedSearch = await searchParams;
   const query = resolvedSearch.q?.trim() ?? "";
+  const demoTables = isDemoMode() ? getDemoTables() : null;
 
   // Load project for requirements
-  const [project] = await db
-    .select()
-    .from(projects)
-    .where(eq(projects.id, projectId));
+  const project = demoTables
+    ? demoTables.projects.find((p) => p.id === projectId)
+    : (
+        await db
+          .select()
+          .from(projects)
+          .where(eq(projects.id, projectId))
+      )[0];
 
   if (!project) {
     return <div className="p-6 text-muted-foreground">Project not found.</div>;
@@ -42,8 +49,22 @@ export default async function CandidatesVettingPage({ params, searchParams }: Pr
 
   // Search candidates using Postgres full-text search
   // search_vector is added via migration (not in Drizzle schema) — use raw SQL for FTS query
+  // (demo mode: deterministic substring match over fixture names/skills)
   let candidateRows;
-  if (query) {
+  if (demoTables) {
+    const q = query.toLowerCase();
+    candidateRows = demoTables.candidates
+      .filter((c) => c.projectId === projectId)
+      .filter(
+        (c) =>
+          !q ||
+          c.name.toLowerCase().includes(q) ||
+          c.email.toLowerCase().includes(q) ||
+          (c.githubHandle ?? "").toLowerCase().includes(q) ||
+          (c.vettingSummary ?? "").toLowerCase().includes(q)
+      )
+      .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99));
+  } else if (query) {
     candidateRows = await db
       .select()
       .from(candidates)
@@ -63,8 +84,9 @@ export default async function CandidatesVettingPage({ params, searchParams }: Pr
   // Load signals for all candidates
   const candidateIds = candidateRows.map((c) => c.id);
 
-  const signalRows =
-    candidateIds.length > 0
+  const signalRows = demoTables
+    ? demoTables.signals.filter((s) => candidateIds.includes(s.candidateId))
+    : candidateIds.length > 0
       ? await db
           .select()
           .from(signalsTable)

@@ -12,6 +12,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { projects, milestones, candidates } from "@/lib/db/schema";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +22,30 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
   const { id: projectId } = await params;
+
+  if (isDemoMode()) {
+    const t = getDemoTables();
+    const project = t.projects.find((p) => p.id === projectId);
+    if (!project) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    const rows = t.milestones
+      .filter((m) => m.projectId === projectId)
+      .sort((a, b) => a.position - b.position)
+      .map((m) => ({
+        id: m.id,
+        title: m.title,
+        status: m.status,
+        budgetUsd: Number(m.budgetUsd),
+        captureGrossUsd: m.captureGrossUsd != null ? Number(m.captureGrossUsd) : null,
+        captureNetUsd: m.captureNetUsd != null ? Number(m.captureNetUsd) : null,
+        captureFeeUsd: m.captureFeeUsd != null ? Number(m.captureFeeUsd) : null,
+        dueDate: m.dueDate ?? null,
+        consultant: t.candidates.find((c) => c.projectId === projectId)?.name ?? null,
+        position: m.position,
+      }));
+    return NextResponse.json({ rows });
+  }
 
   const [project] = await db
     .select({ id: projects.id })

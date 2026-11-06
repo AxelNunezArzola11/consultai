@@ -4,7 +4,12 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "@/components/ui/sonner";
 import { SandboxBadge } from "@/components/demo/SandboxBadge";
+import { DemoModeBanner } from "@/components/demo/DemoModeBanner";
 import "./globals.css";
+
+// The mode banner must reflect the RUNTIME environment on every page.
+// Without this, statically prerendered pages would bake in the build-time mode.
+export const dynamic = "force-dynamic";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -36,6 +41,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           forcedTheme="dark"
           disableTransitionOnChange
         >
+          <DemoModeBanner />
           <SandboxBadge />
           {children}
           <Toaster />

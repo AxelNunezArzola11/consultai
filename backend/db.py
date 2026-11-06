@@ -1,79 +1,43 @@
 """
-Database helpers — thin asyncpg wrapper for Neon Postgres.
+Backward-compatible `backend.db` wrapper delegating to `backend.tools.database`.
 """
-from __future__ import annotations
-
-import os
-from typing import Any
-
+from typing import List, Optional
 import asyncpg
 
+from backend.models import CandidateVettingResult
+from backend.tools.database import (
+    close_db_pool as close_db,
+    get_pool,
+    init_db_pool as init_db,
+    save_candidate_vetting,
+)
 
-_pool: asyncpg.Pool | None = None
+__all__ = ["init_db", "close_db", "get_pool", "save_vetting_result", "get_vetting_results"]
 
 
-async def get_pool() -> asyncpg.Pool:
-    global _pool
-    if _pool is None:
-        dsn = os.environ["NEON_DATABASE_URL"]
-        _pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
-    return _pool
+async def save_vetting_result(result: CandidateVettingResult) -> Optional[int]:
+    return await save_candidate_vetting(
+        github_username=result.github_username,
+        role_target=result.role_target,
+        trust_score=result.trust_score,
+        can_do=result.can_do,
+        cannot_do=result.cannot_do,
+        summary=result.summary,
+    )
 
 
-async def fetch_one(query: str, *args: Any) -> asyncpg.Record | None:
-    pool = await get_pool()
+async def get_vetting_results(github_username: str) -> List[dict]:
+    pool: Optional[asyncpg.Pool] = await init_db()
+    if pool is None:
+        return []
     async with pool.acquire() as conn:
-        return await conn.fetchrow(query, *args)
-
-
-async def execute(query: str, *args: Any) -> None:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(query, *args)
-
-
-# ---------------------------------------------------------------------------
-# Domain helpers
-# ---------------------------------------------------------------------------
-
-async def upsert_vetting_result(result: dict[str, Any]) -> None:
-    """Insert or update a candidate vetting result row."""
-    await execute(
-        """
-        INSERT INTO candidate_vetting
-            (candidate_id, pr_number, trust_score, status,
-             code_quality_summary, test_coverage_estimate, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
-        ON CONFLICT (candidate_id, pr_number) DO UPDATE
-            SET trust_score            = EXCLUDED.trust_score,
-                status                 = EXCLUDED.status,
-                code_quality_summary   = EXCLUDED.code_quality_summary,
-                test_coverage_estimate = EXCLUDED.test_coverage_estimate,
-                updated_at             = NOW()
-        """,
-        result["candidate_id"],
-        result["pr_number"],
-        result["trust_score"],
-        result["status"],
-        result["code_quality_summary"],
-        result.get("test_coverage_estimate"),
-    )
-
-
-async def get_milestone(milestone_id: str) -> asyncpg.Record | None:
-    return await fetch_one(
-        "SELECT * FROM milestones WHERE id = $1", milestone_id
-    )
-
-
-async def update_milestone_status(milestone_id: str, status: str, payout_batch_id: str | None = None) -> None:
-    await execute(
-        """
-        UPDATE milestones
-        SET status = $2, paypal_payout_batch_id = $3, updated_at = NOW()
-        WHERE id = $1
-        """,
-        milestone_id,
-        status,
-        payout_batch_id,
-    )
+        rows = await conn.fetch(
+            """
+            SELECT id, github_username, role_target, trust_score, can_do, cannot_do, summary, created_at
+            FROM candidate_vetting
+            WHERE github_username = $1
+            ORDER BY created_at DESC
+            """,
+            github_username,
+        )
+        return [dict(r) for r in rows]

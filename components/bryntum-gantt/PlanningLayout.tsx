@@ -1,49 +1,26 @@
 /**
- * PlanningLayout — Client Component
+ * PlanningLayout — Client Component (Section 6 Advanced Project Planning)
  *
- * Orchestrates the split-screen layout for the /planning route:
- *   ┌────────────────────┬─────────────────────────────────────┐
- *   │  Unscheduled Tasks │  Bryntum Gantt (Project Timeline)   │
- *   │  (AG Grid)         │                                     │
- *   └────────────────────┴─────────────────────────────────────┘
- *
- * Drag & Drop integration:
- *   1. The Bryntum DragHelper listens for mousedown on `.ag-row` elements
- *      inside the AG Grid panel.
- *   2. It clones the row as a drag proxy and tracks mouse movement.
- *   3. `dropTargetSelector` marks the whole Gantt panel as
- *      the valid drop zone.
- *   4. On drop, the grabbed row element's data-id is used to look up the
- *      task from the unscheduled list.  The task is injected into Bryntum's
- *      TaskStore via `addTask()` and removed from the AG Grid state.
- *
- * TypeScript notes:
- *   – DragHelper is imported from @bryntum/gantt (the core package that
- *     BryntumGantt.tsx already declares as the isolation boundary).
- *   – The ganttRef is threaded down from here so only this file manages
- *     the cross-component communication; BryntumGantt remains stateless
- *     regarding drag-drop.
+ * Orchestrates:
+ * - Project selector & live synchronization between Neon DB, AG Grid Unscheduled Tasks, and Bryntum Gantt
+ * - AI Reschedule & Planning Proposal Trigger + Human Authorization Gate
+ * - Optimistic concurrency persistence via `/api/operations/data` and `/api/ai-ops/approve`
  */
 "use client";
 
-import React, {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import dynamicImport from "next/dynamic";
 import type { BryntumGantt as BryntumGanttClass } from "@bryntum/gantt-react";
-import type { GanttTask, GanttDependency } from "@/components/bryntum-gantt/BryntumGantt";
+import type {
+  GanttTask,
+  GanttDependency,
+  GanttConsultantResource,
+  SchedulingProposalPreview,
+} from "@/components/bryntum-gantt/BryntumGantt";
 import UnscheduledTasksGrid, {
   DEFAULT_UNSCHEDULED_TASKS,
   type UnscheduledTask,
 } from "@/components/bryntum-gantt/UnscheduledTasksGrid";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Dynamic import for BryntumGantt (ssr:false is enforced in the server page,
-// but we also guard here in case PlanningLayout is ever used client-side only)
-// ─────────────────────────────────────────────────────────────────────────────
 
 const BryntumGanttDynamic = dynamicImport(
   () => import("@/components/bryntum-gantt/BryntumGantt"),
@@ -52,71 +29,67 @@ const BryntumGanttDynamic = dynamicImport(
     loading: () => (
       <div
         style={{
-          display:        "flex",
-          alignItems:     "center",
+          display: "flex",
+          alignItems: "center",
           justifyContent: "center",
-          width:          "100%",
-          height:         "100%",
-          background:     "#0a0e18",
-          color:          "#94a3b8",
-          fontFamily:     "system-ui, sans-serif",
-          fontSize:       14,
+          width: "100%",
+          height: "100%",
+          background: "#0a0e18",
+          color: "#94a3b8",
+          fontFamily: "system-ui, sans-serif",
+          fontSize: 14,
         }}
       >
-        Loading project plan…
+        Loading Bryntum Gantt Enterprise Schedule…
       </div>
     ),
   }
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Props
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface PlanningLayoutProps {
-  /** Pre-shaped tasks from the server — passed through to BryntumGantt */
-  initialTasks?: GanttTask[];
-  /** Pre-shaped dependencies from the server */
-  initialDependencies?: GanttDependency[];
+export interface PlanningProjectOption {
+  id: string;
+  title: string;
+  status: string;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Unique ID helper for newly dropped tasks
-// ─────────────────────────────────────────────────────────────────────────────
+export interface PlanningLayoutProps {
+  projectId?: string;
+  projectOptions?: PlanningProjectOption[];
+  initialTasks?: GanttTask[];
+  initialDependencies?: GanttDependency[];
+  initialConsultants?: GanttConsultantResource[];
+  initialProposal?: SchedulingProposalPreview | null;
+}
 
 let _dropSeq = 0;
 function nextDropId(): string {
   return `dropped-${++_dropSeq}`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component
-// ─────────────────────────────────────────────────────────────────────────────
-
 export default function PlanningLayout({
+  projectId,
+  projectOptions = [],
   initialTasks,
   initialDependencies,
+  initialConsultants = [],
+  initialProposal = null,
 }: PlanningLayoutProps) {
-  // ── Unscheduled task state ─────────────────────────────────────────────────
   const [unscheduledTasks, setUnscheduledTasks] = useState<UnscheduledTask[]>(
     DEFAULT_UNSCHEDULED_TASKS
   );
+  const [activeProposal, setActiveProposal] =
+    useState<SchedulingProposalPreview | null>(initialProposal);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [isGeneratingAiProposal, setIsGeneratingAiProposal] = useState(false);
 
-  // ── Gantt ref — used to reach into the Bryntum project's taskStore ─────────
-  // The ref is stored here (the orchestrator) rather than inside BryntumGantt
-  // so the DragHelper drop handler can call addTask without prop-drilling.
   const ganttRef = useRef<BryntumGanttClass | null>(null);
+  const splitRef = useRef<HTMLDivElement>(null);
 
-  // ── Panel DOM refs — needed to set up DragHelper's outerElement ───────────
-  const splitRef      = useRef<HTMLDivElement>(null);
-
-  // ── Track unscheduled tasks in a ref so the DragHelper closure is stable ──
   const unscheduledRef = useRef<UnscheduledTask[]>(unscheduledTasks);
   useEffect(() => {
     unscheduledRef.current = unscheduledTasks;
   }, [unscheduledTasks]);
 
-  // ── addTask helper — injects a task record into Bryntum's TaskStore ────────
   const addTask = useCallback((taskData: Partial<GanttTask>): boolean => {
     const project = ganttRef.current?.instance?.project;
     if (!project) {
@@ -124,8 +97,6 @@ export default function PlanningLayout({
       return false;
     }
 
-    // Copy only serializable task fields from the AG Grid row. Never pass the
-    // row element, row node, or AG Grid data object through to Bryntum.
     const normalizedTask: GanttTask = {
       id: taskData.id ?? nextDropId(),
       name: taskData.name ?? "Dropped task",
@@ -139,62 +110,53 @@ export default function PlanningLayout({
     return true;
   }, []);
 
-  const scheduleTask = useCallback((taskId: string | number, targetStartDate: string): boolean => {
-    const task = unscheduledRef.current.find((candidate) => String(candidate.id) === String(taskId));
-    if (!task) {
-      console.error("[Planning] Cannot schedule task: AI task ID is not in the unscheduled list.");
-      return false;
-    }
-
-    const inserted = addTask({
-      id: task.id,
-      name: task.name,
-      startDate: targetStartDate,
-      duration: Number(task.estimatedDays) || 1,
-      percentDone: 0,
-    });
-    if (inserted) {
-      setUnscheduledTasks((current) =>
-        current.filter((candidate) => String(candidate.id) !== String(task.id))
+  const scheduleTask = useCallback(
+    (taskId: string | number, targetStartDate: string): boolean => {
+      const task = unscheduledRef.current.find(
+        (candidate) => String(candidate.id) === String(taskId)
       );
-    }
-    return inserted;
-  }, [addTask]);
+      if (!task) {
+        return false;
+      }
 
-  // ── Set up the Bryntum DragHelper after the DOM is ready ──────────────────
+      const inserted = addTask({
+        id: task.id,
+        name: task.name,
+        startDate: targetStartDate,
+        duration: Number(task.estimatedDays) || 1,
+        percentDone: 0,
+      });
+      if (inserted) {
+        setUnscheduledTasks((current) =>
+          current.filter((candidate) => String(candidate.id) !== String(task.id))
+        );
+        setSyncMessage(`Scheduled '${task.name}' starting ${targetStartDate}`);
+      }
+      return inserted;
+    },
+    [addTask]
+  );
+
+  // Set up Bryntum DragHelper for AG Grid -> Bryntum Gantt row dragging
   useEffect(() => {
     if (!splitRef.current) return;
 
     let dragHelper: { destroy(): void } | null = null;
     let disposed = false;
 
-    // DragHelper is a Bryntum core class — import it lazily (browser-only).
     import("@bryntum/gantt").then(({ DragHelper }) => {
       if (!splitRef.current || disposed) return;
 
       dragHelper = new DragHelper({
-        // The outer boundary for drag operations — the whole split panel.
         outerElement: splitRef.current,
-
-        // Target AG Grid rendered rows as the draggable elements.
         targetSelector: ".ag-row",
-
-        // Accept the whole Gantt panel. Bryntum's internal subgrid classes
-        // vary between views, so do not limit drops to the canvas layer.
         dropTargetSelector: ".gantt-drop-zone, .b-gantt, .b-gridbase",
-
-        // Clone the row as a visual proxy; keep the original row in the grid.
-        cloneTarget:          true,
-        mode:                 "translateXY",
-        dragThreshold:        5,
-        hideOriginalElement:  false,
+        cloneTarget: true,
+        mode: "translateXY",
+        dragThreshold: 5,
+        hideOriginalElement: false,
 
         listeners: {
-          /**
-           * Keep the drop indicator enabled anywhere inside the right-hand
-           * Gantt panel. This deliberately does not validate task data here;
-           * the drop handler performs the safe row lookup before insertion.
-           */
           drag({
             context,
           }: {
@@ -208,26 +170,20 @@ export default function PlanningLayout({
             );
           },
 
-          /**
-           * Fires on drop — inject task into Bryntum and remove from AG Grid.
-           * NOTE: Bryntum's DragHelperListeners "drop" type does NOT include
-           * the raw DOM event. Date resolution uses the proxy element's page X.
-           */
           drop({
             context,
           }: {
             context: {
               element: HTMLElement;
               grabbed: HTMLElement;
-              target:  HTMLElement;
+              target: HTMLElement;
               relatedElements: HTMLElement[];
-              valid:   boolean;
+              valid: boolean;
             };
           }) {
-            if (!context.target?.closest(".gantt-drop-zone, .b-gantt, .b-gridbase")) return;
+            if (!context.target?.closest(".gantt-drop-zone, .b-gantt, .b-gridbase"))
+              return;
 
-            // 1. Resolve which task was dragged using the row's data-row-id.
-            //    AG Grid 32 sets `row-id` on the .ag-row element via getRowId().
             const row = context.grabbed.closest<HTMLElement>(".ag-row");
             const rowId =
               row?.getAttribute("row-id") ??
@@ -240,12 +196,8 @@ export default function PlanningLayout({
               ? unscheduledRef.current.find((t) => String(t.id) === String(rowId))
               : undefined;
 
-            if (!task) {
-              console.error("[Planning] Cannot schedule task: dragged AG Grid row has no matching task.");
-              return;
-            }
+            if (!task) return;
 
-            // 2. Determine the target date from the proxy element's X position.
             const proxyRect = context.element.getBoundingClientRect();
             const dropX = proxyRect.left + proxyRect.width / 2;
 
@@ -255,7 +207,7 @@ export default function PlanningLayout({
                     x: number,
                     roundingMethod?: "floor" | "round" | "ceil",
                     local?: boolean,
-                    allowOutOfRange?: boolean,
+                    allowOutOfRange?: boolean
                   ) => Date;
                 }
               | undefined;
@@ -278,92 +230,260 @@ export default function PlanningLayout({
       disposed = true;
       dragHelper?.destroy();
     };
-    // DragHelper is created once; refs keep its task and Gantt state current.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Stable onExternalDrop for BryntumGantt (kept for backwards-compat) ─────
   const handleExternalDrop = useCallback((payload: unknown, date: Date) => {
     console.debug("[Gantt] external drop:", payload, "at", date);
   }, []);
 
-  // ── AI copilot stub ────────────────────────────────────────────────────────
-  const handleAiMessage = useCallback(async (message: string): Promise<string> => {
-    const response = await fetch("/api/ai/planning", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message,
-        availableTasks: unscheduledRef.current.map(({ id, name }) => ({ id, name })),
-      }),
-    });
-    const result = (await response.json()) as {
-      text?: string;
-      error?: string;
-      toolCalls?: Array<{
-        toolName: string;
-        input: { taskId: string | number; targetStartDate: string };
-      }>;
-    };
-    if (!response.ok) throw new Error(result.error ?? "The planning AI request failed.");
-
-    const scheduled: string[] = [];
-    for (const call of result.toolCalls ?? []) {
-      if (call.toolName !== "scheduleTask") continue;
-      if (scheduleTask(call.input.taskId, call.input.targetStartDate)) {
-        scheduled.push(`Scheduled task \`${call.input.taskId}\` for ${call.input.targetStartDate}.`);
+  // AI Copilot handler — receives validated SchedulingProposal from Planning/Reschedule Agent
+  const handleAiMessage = useCallback(
+    async (message: string): Promise<string> => {
+      const response = await fetch("/api/ai/planning", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          projectId,
+          availableTasks: unscheduledRef.current.map(({ id, name }) => ({
+            id,
+            name,
+          })),
+        }),
+      });
+      const result = (await response.json()) as {
+        text?: string;
+        error?: string;
+        schedulingProposal?: SchedulingProposalPreview | null;
+        toolCalls?: Array<{
+          toolName: string;
+          input: { taskId: string | number; targetStartDate: string };
+        }>;
+      };
+      if (!response.ok) {
+        throw new Error(result.error ?? "The planning AI request failed.");
       }
-    }
-    return [result.text, ...scheduled].filter(Boolean).join("\n\n") || "I could not produce a planning response.";
-  }, [scheduleTask]);
 
-  // ── Task change handler ────────────────────────────────────────────────────
-  const handleTaskChange = useCallback((task: GanttTask) => {
-    console.debug("[Gantt] task changed:", task);
+      if (result.schedulingProposal) {
+        setActiveProposal(result.schedulingProposal);
+      }
+
+      const scheduled: string[] = [];
+      for (const call of result.toolCalls ?? []) {
+        if (call.toolName !== "scheduleTask") continue;
+        if (scheduleTask(call.input.taskId, call.input.targetStartDate)) {
+          scheduled.push(
+            `Scheduled backlog task \`${call.input.taskId}\` for ${call.input.targetStartDate}.`
+          );
+        }
+      }
+      return (
+        [result.text, ...scheduled].filter(Boolean).join("\n\n") ||
+        "Prepared scheduling assessment."
+      );
+    },
+    [projectId, scheduleTask]
+  );
+
+  // Trigger Reschedule Agent directly from top bar
+  const handleTriggerRescheduleProposal = async () => {
+    setIsGeneratingAiProposal(true);
+    setSyncMessage("Running Reschedule Agent critical-path analysis…");
+    try {
+      const res = await fetch("/api/ai-ops/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_request:
+            "Analyze project schedule dependencies and propose a +3 day Finish-to-Start reschedule for unlocked milestones",
+          operation_type: "schedule_reschedule",
+          project_id: projectId,
+          context: { delay_days: 3 },
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.scheduling_proposals?.[0]) {
+        setActiveProposal(data.scheduling_proposals[0]);
+        setSyncMessage(
+          `Proposal ${data.scheduling_proposals[0].proposal_id} ready for human authorization.`
+        );
+      } else {
+        setSyncMessage(data.error ?? "Completed schedule analysis.");
+      }
+    } catch (err) {
+      setSyncMessage(
+        err instanceof Error ? err.message : "Failed to run Reschedule Agent."
+      );
+    } finally {
+      setIsGeneratingAiProposal(false);
+    }
+  };
+
+  // Authorize & apply scheduling proposal via /api/ai-ops/approve
+  const handleApproveProposal = useCallback(
+    async (proposal: SchedulingProposalPreview) => {
+      const res = await fetch("/api/ai-ops/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proposal_id: proposal.proposal_id,
+          execution_id: proposal.execution_id,
+          decision: "approved",
+          actor_id: "company-schedule-approver",
+          actor_role: "company",
+          reason: "Authorized schedule adjustments from Bryntum Gantt Planning console",
+        }),
+      });
+      if (res.ok) {
+        setActiveProposal((prev) =>
+          prev ? { ...prev, status: "approved" } : null
+        );
+        setSyncMessage(
+          `✓ Authorized proposal ${proposal.proposal_id} and synchronized ${proposal.adjustments.length} milestone(s) in Neon DB.`
+        );
+      }
+    },
+    []
+  );
+
+  const handleRejectProposal = useCallback(
+    async (proposal: SchedulingProposalPreview) => {
+      const res = await fetch("/api/ai-ops/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proposal_id: proposal.proposal_id,
+          execution_id: proposal.execution_id,
+          decision: "rejected",
+          actor_id: "company-schedule-approver",
+          actor_role: "company",
+          reason: "Rejected proposed schedule shift in Planning console",
+        }),
+      });
+      if (res.ok) {
+        setActiveProposal(null);
+        setSyncMessage(`Rejected scheduling proposal ${proposal.proposal_id}.`);
+      }
+    },
+    []
+  );
+
+  // Persist task modifications back to Neon DB so Bryntum and AG Grid remain in sync
+  const handleTaskChange = useCallback(async (task: GanttTask) => {
+    const idStr = String(task.id);
+    if (idStr.startsWith("seed-") || idStr.startsWith("dropped-") || idStr.startsWith("u-")) {
+      return;
+    }
+    try {
+      const startIso =
+        typeof task.startDate === "string"
+          ? task.startDate.slice(0, 10)
+          : new Date(task.startDate as unknown as string).toISOString().slice(0, 10);
+      const dur = Number(task.duration) || 1;
+      const startDt = new Date(`${startIso}T00:00:00Z`);
+      startDt.setUTCDate(startDt.getUTCDate() + dur);
+      const dueIso = startDt.toISOString().slice(0, 10);
+
+      const res = await fetch("/api/operations/data", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entity: "task",
+          id: idStr,
+          updates: {
+            title: task.name,
+            startDate: startIso,
+            dueDate: dueIso,
+          },
+        }),
+      });
+      if (res.ok) {
+        setSyncMessage(`Synchronized '${task.name}' (${startIso} → ${dueIso}) to Neon DB`);
+      }
+    } catch {
+      // Non-fatal UI sync
+    }
   }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Render
-  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div
-      ref={splitRef}
-      className="flex min-h-[calc(100vh-80px)] min-w-0 w-full flex-row overflow-hidden bg-slate-950"
-    >
-      {/* ── Left panel: Unscheduled Tasks (AG Grid) ───────────────────────── */}
-      <div
-        className="flex w-80 shrink-0 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50"
-      >
-        <UnscheduledTasksGrid tasks={unscheduledTasks} />
+    <div className="flex min-h-[calc(100vh-80px)] min-w-0 w-full flex-col overflow-hidden bg-slate-950 p-3 gap-3">
+      {/* ── Project Header & Multi-Agent Reschedule Bar ─────────────────────── */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-2.5 text-xs">
+        <div className="flex items-center gap-3">
+          <span className="font-semibold text-white">Active Project Plan:</span>
+          {projectOptions.length > 0 ? (
+            <select
+              value={projectId ?? projectOptions[0]?.id}
+              onChange={(e) => {
+                window.location.href = `/planning?projectId=${encodeURIComponent(e.target.value)}`;
+              }}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-medium text-slate-100"
+            >
+              {projectOptions.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.title} ({p.status})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-slate-400">Default Enterprise Schedule</span>
+          )}
+          {syncMessage && (
+            <span className="rounded bg-slate-800 px-2.5 py-1 text-[11px] text-emerald-400">
+              {syncMessage}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={isGeneratingAiProposal}
+            onClick={handleTriggerRescheduleProposal}
+            className="rounded-lg border border-blue-500/40 bg-blue-500/15 px-3 py-1.5 text-xs font-semibold text-blue-300 hover:bg-blue-500/25 disabled:opacity-50"
+          >
+            {isGeneratingAiProposal
+              ? "Running Reschedule Agent…"
+              : "✦ Generate AI Reschedule Proposal"}
+          </button>
+          <a
+            href="/operations?tab=tasks"
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
+          >
+            ⊞ Open in AG Grid Operations
+          </a>
+        </div>
       </div>
 
-      {/* ── Divider hint ────────────────────────────────────────────────────── */}
+      {/* ── Split-Screen Backlog AG Grid + Bryntum Gantt ────────────────────── */}
       <div
-        className="w-px shrink-0 bg-slate-800"
-      />
-
-      {/* ── Right panel: Bryntum Gantt timeline ──────────────────────────── */}
-      <div
-        className="gantt-drop-zone flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50"
+        ref={splitRef}
+        className="flex min-h-0 min-w-0 flex-1 flex-row gap-3 overflow-hidden"
       >
-        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-          <BryntumGanttDynamic
-            // Thread the ref through via a callback ref pattern: BryntumGantt
-            // exposes no forwardRef, so we read ganttRef from the rendered
-            // widget's instance inside the drop handler instead.
-            tasks={initialTasks && initialTasks.length > 0 ? initialTasks : undefined}
-            dependencies={
-              initialDependencies && initialDependencies.length > 0
-                ? initialDependencies
-                : undefined
-            }
-            onTaskChange={handleTaskChange}
-            onExternalDrop={handleExternalDrop}
-            onAiMessage={handleAiMessage}
-            // Pass our ganttRef down so the DragHelper can call into the store.
-            // BryntumGantt accepts an optional ganttRef prop (added below).
-            ganttRef={ganttRef}
-          />
+        <div className="flex w-80 shrink-0 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50">
+          <UnscheduledTasksGrid tasks={unscheduledTasks} />
+        </div>
+
+        <div className="gantt-drop-zone flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/50">
+          <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+            <BryntumGanttDynamic
+              tasks={initialTasks && initialTasks.length > 0 ? initialTasks : undefined}
+              dependencies={
+                initialDependencies && initialDependencies.length > 0
+                  ? initialDependencies
+                  : undefined
+              }
+              consultants={initialConsultants}
+              activeProposal={activeProposal}
+              onApproveProposal={handleApproveProposal}
+              onRejectProposal={handleRejectProposal}
+              onTaskChange={handleTaskChange}
+              onExternalDrop={handleExternalDrop}
+              onAiMessage={handleAiMessage}
+              ganttRef={ganttRef}
+            />
+          </div>
         </div>
       </div>
     </div>

@@ -22,11 +22,12 @@
  *   - agentSessionId is validated as alphanumeric-safe (nanoid format).
  */
 
-import { streamText, convertToModelMessages } from "ai";
+import { streamText, convertToModelMessages, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import { createGroq } from "@ai-sdk/groq";
 import { db } from "@/lib/db";
 import { projects } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { isDemoMode } from "@/lib/demo/config";
 import { checkBriefRateLimit } from "@/lib/brief/rate-limit";
 import {
   buildBriefAgentSystemPrompt,
@@ -150,6 +151,33 @@ async function briefAgentHandler(req: NextRequest) {
       },
       { status: 400 }
     );
+  }
+
+  // Demo mode: deterministic simulated plan stream (no LLM, no database).
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const { buildSimulatedBriefText } = await import("@/lib/demo/simulated-brief");
+    const project = getDemoTables().projects.find((p) => p.id === projectId);
+    if (!project) {
+      return Response.json({ error: "Project not found" }, { status: 404 });
+    }
+    const text = buildSimulatedBriefText(project.title);
+    const stream = createUIMessageStream({
+      execute: ({ writer }) => {
+        writer.write({ type: "text-start", id: "demo-brief-text" });
+        // Chunk the deltas so the chat UI streams progressively.
+        const chunkSize = 400;
+        for (let i = 0; i < text.length; i += chunkSize) {
+          writer.write({
+            type: "text-delta",
+            id: "demo-brief-text",
+            delta: text.slice(i, i + chunkSize),
+          });
+        }
+        writer.write({ type: "text-end", id: "demo-brief-text" });
+      },
+    });
+    return createUIMessageStreamResponse({ stream });
   }
 
   // Validate project exists + rate limit check — run in parallel to save ~200-400ms

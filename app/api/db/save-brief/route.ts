@@ -19,10 +19,22 @@ import { projects, milestones, auditLog, briefDrafts } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { normalizeBriefPlan } from "@/lib/brief/schema";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
+  // ── 0. Authorization: company or admin only ─────────────────────────────────
+  const { getRoleFromCookie } = await import("@/lib/auth/role-cookie");
+  const role = await getRoleFromCookie(req.headers.get("cookie"));
+  if (role !== "company" && role !== "admin") {
+    return Response.json(
+      { ok: false, errors: ["Saving plans requires the company or admin role. Use Switch Role to continue as a company operator."] },
+      { status: 403 }
+    );
+  }
+  void role;
+
   // ── 1. Parse body ──────────────────────────────────────────────────────────
   let body: { projectId?: string; agentSessionId?: string; plan?: unknown };
   try {
@@ -44,6 +56,74 @@ export async function POST(req: NextRequest) {
   }
 
   console.log("[save-brief] incoming:", { projectId, agentSessionId, planKeys: Object.keys(plan as object) });
+
+  // ── Demo mode: same validation, writes go to the isolated in-memory store ──
+  if (isDemoMode()) {
+    const { getDemoTables, appendDemoAudit } = await import("@/lib/demo/store");
+    const t = getDemoTables();
+    const project = t.projects.find((p) => p.id === projectId);
+    if (!project) {
+      return Response.json({ ok: false, errors: ["Project not found"] }, { status: 404 });
+    }
+    const { plan: normalized, downgradedCriteria, errors } = normalizeBriefPlan(plan);
+    if (errors.length > 0) {
+      return Response.json({ ok: false, errors }, { status: 422 });
+    }
+    project.structuredPlan = normalized as Record<string, unknown>;
+    project.updatedAt = new Date();
+    t.milestones = t.milestones.filter(
+      (m) => !(m.projectId === projectId && m.status === "planned")
+    );
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    normalized.milestones.forEach((m, i) => {
+      const dueDate = new Date(today.getTime() + m.dueDaysOffset * 24 * 60 * 60 * 1000);
+      const now = new Date();
+      t.milestones.push({
+        id: `${projectId}_m${i + 1}`,
+        projectId,
+        title: m.title,
+        description: m.description ?? null,
+        budgetUsd: String(m.budgetUsd),
+        dueDate: dueDate.toISOString().slice(0, 10),
+        status: "planned",
+        dependsOnId: null,
+        offsetDays: null,
+        startDate: null,
+        version: 0,
+        paypalOrderId: null,
+        paypalCaptureId: null,
+        captureGrossUsd: null,
+        captureFeeUsd: null,
+        captureNetUsd: null,
+        currency: null,
+        paypalPayoutBatchId: null,
+        paypalPayoutItemId: null,
+        idempotencyKey: null,
+        position: i,
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    appendDemoAudit({
+      entityType: "project",
+      entityId: projectId,
+      event: "BRIEF_SAVED",
+      actor: "company",
+      payload: {
+        projectTitle: normalized.projectTitle,
+        milestoneCount: normalized.milestones.length,
+        totalBudgetUsd: normalized.totalBudgetUsd,
+      },
+    });
+    return Response.json({
+      ok: true,
+      milestoneCount: normalized.milestones.length,
+      totalBudgetUsd: normalized.totalBudgetUsd,
+      downgradedCriteria,
+      simulated: true,
+    });
+  }
 
   // ── 2. Validate project exists ─────────────────────────────────────────────
   const projectRows = await db

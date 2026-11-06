@@ -8,6 +8,8 @@ import { notFound } from "next/navigation";
 // dynamic import (ssr: false). We import it directly here — the ssr:false is
 // applied inside FinancialLedgerView.tsx, not at the page level.
 import { FinancialLedgerView } from "@/components/canvas/FinancialLedgerView";
+import { isDemoMode } from "@/lib/demo/config";
+import { getDemoTables } from "@/lib/demo/store";
 
 export default async function FinancialLedgerPage({
   params,
@@ -16,11 +18,17 @@ export default async function FinancialLedgerPage({
 }) {
   const { id } = await params;
 
-  const [project] = await db
-    .select({ id: projects.id, title: projects.title })
-    .from(projects)
-    .where(eq(projects.id, id))
-    .limit(1);
+  const demoTables = isDemoMode() ? getDemoTables() : null;
+
+  const project = demoTables
+    ? demoTables.projects.find((p) => p.id === id)
+    : (
+        await db
+          .select({ id: projects.id, title: projects.title })
+          .from(projects)
+          .where(eq(projects.id, id))
+          .limit(1)
+      )[0];
 
   if (!project) notFound();
 

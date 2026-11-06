@@ -13,6 +13,7 @@ import { candidates } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/db/audit";
 import { eq, and } from "drizzle-orm";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { isDemoMode } from "@/lib/demo/config";
 
 export async function POST(request: NextRequest) {
   const role = await getRoleFromCookie(request.headers.get("cookie"));
@@ -30,6 +31,30 @@ export async function POST(request: NextRequest) {
   const { candidateId, projectId } = body;
   if (!candidateId || !projectId) {
     return NextResponse.json({ error: "candidateId and projectId are required" }, { status: 400 });
+  }
+
+  if (isDemoMode()) {
+    const { getDemoTables } = await import("@/lib/demo/store");
+    const candidate = getDemoTables().candidates.find(
+      (c) => c.id === candidateId && c.projectId === projectId
+    );
+    if (!candidate) {
+      return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
+    }
+    if (candidate.status === "shortlisted") {
+      return NextResponse.json({ ok: true, status: "shortlisted", alreadyShortlisted: true, simulated: true });
+    }
+    const previousStatus = candidate.status;
+    candidate.status = "shortlisted";
+    candidate.updatedAt = new Date();
+    await writeAuditLog({
+      entityType: "candidate",
+      entityId: candidateId,
+      event: "CANDIDATE_SHORTLISTED",
+      actor: "company",
+      payload: { projectId, previousStatus },
+    });
+    return NextResponse.json({ ok: true, status: "shortlisted", simulated: true });
   }
 
   const [candidate] = await db

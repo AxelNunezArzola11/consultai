@@ -12,6 +12,7 @@ import { briefDrafts } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { NextRequest } from "next/server";
+import { isDemoMode } from "@/lib/demo/config";
 
 export async function POST(req: NextRequest) {
   let body: {
@@ -36,6 +37,12 @@ export async function POST(req: NextRequest) {
     agentSessionId.length > 100
   ) {
     return Response.json({ error: "agentSessionId required" }, { status: 400 });
+  }
+
+  // Demo mode: drafts live only in the planner UI session (no persistence
+  // needed — Approve & Save persists the plan to the demo store instead).
+  if (isDemoMode()) {
+    return Response.json({ ok: true, id: agentSessionId, simulated: true });
   }
 
   // Upsert: update existing draft for this session, or insert new
