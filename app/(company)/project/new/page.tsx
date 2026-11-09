@@ -4,10 +4,18 @@
  * URL: /project/new
  * Query params:
  *   ?projectId=<id>          — existing draft to open in the planner
+ *   &title=<title>            — creation title (demo rehydration, see below)
  *   &brief=<urlencoded brief> — optional pre-fill for the planning chat
  *
  * Loading this page NEVER writes to the database. The draft row is created
  * only by POST /api/projects after the user submits the start form.
+ *
+ * Demo rehydration: the demo store is per server instance, but serverless
+ * routing can send the planner GET to an instance that never saw the POST.
+ * In demo mode only, a lookup miss carrying the POST-accepted creation
+ * params restores that same draft into the local instance store
+ * (resolveDemoDraftForPlanning) instead of reporting "not found". Bare or
+ * invalid IDs still miss, and the company scope check below still applies.
  */
 export const dynamic = "force-dynamic";
 
@@ -18,14 +26,22 @@ import { eq } from "drizzle-orm";
 import { NewProjectClient } from "./NewProjectClient";
 import { NewProjectStartForm } from "./NewProjectStartForm";
 import { isDemoMode } from "@/lib/demo/config";
-import { getDemoTables } from "@/lib/demo/store";
+import {
+  demoCompanyForSession,
+  resolveDemoDraftForPlanning,
+} from "@/lib/demo/drafts";
+import { requirePageRole, scopedCompanyId } from "@/lib/auth/guards";
+import { notFound } from "next/navigation";
 
 export default async function NewProjectPage({
   searchParams,
 }: {
-  searchParams: Promise<{ projectId?: string; brief?: string }>;
+  searchParams: Promise<{ projectId?: string; title?: string; brief?: string }>;
 }) {
-  const { projectId, brief } = await searchParams;
+  const { projectId, title, brief } = await searchParams;
+  // Authenticate + authorize BEFORE querying/rendering (demo bypass: fixtures only).
+  const auth = await requirePageRole(["company", "admin"]);
+  const scope = scopedCompanyId(auth);
 
   // No draft selected yet — show the start form (no DB writes).
   if (!projectId) {
@@ -34,16 +50,33 @@ export default async function NewProjectPage({
 
   const draft = isDemoMode()
     ? (() => {
-        const p = getDemoTables().projects.find((r) => r.id === projectId);
-        return p ? { id: p.id, rawBrief: p.rawBrief } : undefined;
+        // Owning company derived server-side exactly like POST /api/projects.
+        // Never from the URL — links cannot spoof ownership.
+        const companyId = demoCompanyForSession(auth.session?.companyId);
+        return resolveDemoDraftForPlanning({
+          projectId,
+          title,
+          brief,
+          companyId,
+        });
       })()
     : (
         await db
-          .select({ id: projects.id, rawBrief: projects.rawBrief })
+          .select({
+            id: projects.id,
+            title: projects.title,
+            rawBrief: projects.rawBrief,
+            companyId: projects.companyId,
+          })
           .from(projects)
           .where(eq(projects.id, projectId))
           .limit(1)
       )[0];
+
+  // Live company sessions open their own drafts only (non-disclosing).
+  if (!auth.demoBypass && scope && draft && draft.companyId !== scope) {
+    notFound();
+  }
 
   if (!draft) {
     return (
@@ -80,9 +113,10 @@ export default async function NewProjectPage({
   return (
     <NewProjectClient
       projectId={draft.id}
-      initialBrief={
-        brief ? decodeURIComponent(brief) : (draft.rawBrief ?? undefined)
-      }
+      // searchParams arrive percent-decoded from Next — use verbatim.
+      // Decoding again throws "URI malformed" on realistic briefs with "%".
+      initialBrief={brief ? brief : (draft.rawBrief ?? undefined)}
+      initialTitle={draft.title ?? title ?? undefined}
       feePolicy={feePolicy}
     />
   );

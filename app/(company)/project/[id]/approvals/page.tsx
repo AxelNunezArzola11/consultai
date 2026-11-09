@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { ApprovalCard } from "@/components/payments/ApprovalCard";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { requireProjectAccess } from "@/lib/auth/guards";
 
 export default async function ApprovalsPage({
   params,
@@ -17,6 +18,8 @@ export default async function ApprovalsPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  // Role gate + company ownership (live); cross-company -> notFound, before any query.
+  await requireProjectAccess(id);
   const demoTables = isDemoMode() ? getDemoTables() : null;
 
   const project = demoTables
@@ -100,15 +103,16 @@ export default async function ApprovalsPage({
       : [];
 
   return (
-    <div className="px-6 py-8 max-w-4xl mx-auto w-full space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="mx-auto w-full max-w-4xl space-y-6 px-6 py-8">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800/80 pb-5">
         <div>
-          <h1 className="text-2xl font-bold">Approvals</h1>
-          <p className="text-muted-foreground text-sm mt-1">
-            Payment approval queue for {project.title}
+          <h1 className="text-2xl font-bold tracking-tight text-white">Approvals</h1>
+          <p className="mt-1 text-xs text-slate-400">
+            Human-gated payment approval queue for {project.title}
           </p>
         </div>
-        <span className="inline-flex items-center rounded-full border border-amber-700/60 bg-amber-950/40 px-3 py-1 text-xs font-medium text-amber-300">
+        <span className="inline-flex items-center gap-1.5 rounded border border-amber-500/30 bg-amber-950/40 px-2.5 py-1 font-mono text-xs font-medium text-amber-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
           Sandbox mode
         </span>
       </div>
@@ -141,34 +145,36 @@ export default async function ApprovalsPage({
             milestone.status === "verifying" ? "default" as const : "outline" as const;
 
           return (
-            <Card key={milestone.id}>
+            <Card key={milestone.id} className="border-slate-800 bg-[#0f141e]">
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
-                  <CardTitle className="text-base">{milestone.title}</CardTitle>
+                  <CardTitle className="text-base text-white">{milestone.title}</CardTitle>
                   <Badge variant={badgeVariant}>{statusLabel}</Badge>
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
                 {/* Ledger — always shown when any capture data exists */}
                 {(grossUsd || netUsd) && (
-                  <div className="rounded-lg border border-slate-700 bg-slate-800/60 px-4 py-3 text-xs space-y-1">
-                    <p className="font-medium text-muted-foreground mb-1">Ledger</p>
+                  <div className="rounded-lg border border-slate-800 bg-[#090c12]/80 px-4 py-3 text-xs space-y-1.5">
+                    <p className="font-mono text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                      Escrow Ledger Breakdown
+                    </p>
                     {grossUsd && (
                       <div className="flex justify-between">
-                        <span className="text-muted-foreground">Company paid (gross)</span>
-                        <strong>${Number(grossUsd).toFixed(2)} {currency}</strong>
+                        <span className="text-slate-400">Company paid (gross)</span>
+                        <strong className="font-mono tabular-nums text-slate-200">${Number(grossUsd).toFixed(2)} {currency}</strong>
                       </div>
                     )}
                     {feeUsd && (
                       <div className="flex justify-between">
-                        <span className="text-muted-foreground">PayPal fee (orders)</span>
-                        <span className="text-destructive">−${Number(feeUsd).toFixed(2)}</span>
+                        <span className="text-slate-400">PayPal fee (orders)</span>
+                        <span className="font-mono tabular-nums text-rose-400">−${Number(feeUsd).toFixed(2)}</span>
                       </div>
                     )}
                     {netUsd && (
-                      <div className="flex justify-between border-t pt-1 mt-1">
-                        <span className="font-medium">Platform holds</span>
-                        <strong className="text-green-600 dark:text-green-400">
+                      <div className="flex justify-between border-t border-slate-800 pt-1.5 mt-1">
+                        <span className="font-medium text-slate-300">Platform holds</span>
+                        <strong className="font-mono tabular-nums text-emerald-400">
                           ${Number(netUsd).toFixed(2)} {currency}
                         </strong>
                       </div>

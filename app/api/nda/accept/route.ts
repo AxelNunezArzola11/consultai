@@ -21,7 +21,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { ndas, candidates, meetings } from "@/lib/db/schema";
 import { validateInviteToken } from "@/lib/nda/invite-token";
@@ -118,6 +118,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     .set({ inviteTokenRateLimit: (nda.inviteTokenRateLimit ?? 0) + 1 })
     .where(eq(ndas.id, ndaId));
 
+  // If the NDA has already been accepted, validate that the presented rawToken
+  // matches the stored hash (ignoring the single-use `inviteTokenUsed` flag) so
+  // replaying a genuine accepted invitation returns a safe 409 already_accepted
+  // instead of a generic 404.
+  if (nda.status === "accepted") {
+    const replayValidation = validateInviteToken(
+      rawToken,
+      nda.inviteTokenHash ?? null,
+      false,
+      nda.inviteTokenExpiresAt ?? null,
+      (nda.inviteTokenRateLimit ?? 0) + 1
+    );
+    if (replayValidation.valid) {
+      return NextResponse.json({ error: "already_accepted" }, { status: 409 });
+    }
+    return OPAQUE_ERROR;
+  }
+
   const validation = validateInviteToken(
     rawToken,
     nda.inviteTokenHash ?? null,
@@ -149,10 +167,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return OPAQUE_ERROR;
   }
 
-  // Check NDA hasn't already been accepted or expired
-  if (nda.status === "accepted") {
-    return NextResponse.json({ error: "already_accepted" }, { status: 409 });
-  }
+  // Check NDA hasn't expired
   if (nda.status === "expired") {
     return OPAQUE_ERROR;
   }

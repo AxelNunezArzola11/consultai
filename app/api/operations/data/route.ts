@@ -33,6 +33,8 @@ import {
 import { ensureAiOpsTables } from "@/lib/ai-ops/orchestrator-engine";
 import { writeAuditLog } from "@/lib/db/audit";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { desc, eq, sql } from "drizzle-orm";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
@@ -40,10 +42,108 @@ import { withTimeout } from "@/lib/db/with-timeout";
 
 export const dynamic = "force-dynamic";
 
+// ── Shared consultant-update validation (demo + live must behave identically) ──
+// Mirrors candidateStatusEnum in lib/db/schema.ts — keep in sync.
+const VALID_CANDIDATE_STATUSES = new Set([
+  "pending", "shortlisted", "nda_sent", "nda_signed", "scheduled",
+  "selected", "rejected", "cascaded", "found", "booking_unlocked",
+  "booked", "meeting_held", "declined", "expired", "cancelled",
+  "no_show", "invalid_booking",
+]);
+
+const VALID_TABS = [
+  "consultants",
+  "projects",
+  "tasks",
+  "companies",
+  "contracts",
+  "payments",
+  "executions",
+] as const;
+type OperationsTab = (typeof VALID_TABS)[number];
+
+/** Contracts grid never carries full document hashes — last4 marker only. */
+function redactDocumentHash(hash: string | null | undefined): string {
+  if (!hash || hash === "—") return "—";
+  return `sha256:…${hash.slice(-4)}`;
+}
+
+function validateConsultantUpdates(updates: Record<string, unknown>): {
+  rank?: number;
+  status?: string;
+  error?: string;
+} {
+  const out: { rank?: number; status?: string; error?: string } = {};
+  if (updates.rank !== undefined) {
+    const r = Number(updates.rank);
+    if (!Number.isInteger(r) || r < 1 || r > 100) {
+      return { error: "rank must be an integer between 1 and 100." };
+    }
+    out.rank = r;
+  }
+  if (updates.status !== undefined) {
+    if (typeof updates.status !== "string" || !VALID_CANDIDATE_STATUSES.has(updates.status)) {
+      return { error: `status must be one of: ${[...VALID_CANDIDATE_STATUSES].join(", ")}.` };
+    }
+    out.status = updates.status;
+  }
+  return out;
+}
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
-    await withTimeout(ensureAiOpsTables(), 15000, "operations schema check");
+    const cookieHeader = req.headers.get("cookie") ?? null;
+    const session = await getSessionFromCookie(cookieHeader);
+    const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+    if (role !== "company" && role !== "admin") {
+      return NextResponse.json(
+        {
+          error: "forbidden",
+          message: "Enterprise operations and financial grids require the company or admin role.",
+        },
+        { status: 403 }
+      );
+    }
+
+    // Live mode: company callers need a verified session (D.3 — a bare role
+    // cookie must never authorize company access, and must never receive
+    // the unscoped multi-company payload below).
+    if (!companySessionAllowsLiveAccess(role, session)) {
+      return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+    }
+
+    const getIpAddr = getIp(req);
+    const getLimit = checkRateLimit("ops-get", getIpAddr, 60, 60);
+    if (!getLimit.ok) {
+      return NextResponse.json(
+        { error: "Rate limit exceeded" },
+        { status: 429, headers: { "Retry-After": String(getLimit.retryAfterSec) } }
+      );
+    }
+
+    // Tab minimization: each response carries one grid only, so a tab can
+    // never over-collect sibling domains. Unknown tabs are rejected;
+    // company callers must name the tab (fail closed) except demo
+    // session-less holders, who keep the full fictional payload (parity
+    // with the demo walkthrough). Admin may omit the tab (back-compat).
     const { searchParams } = new URL(req.url);
+    const tabParam = searchParams.get("tab");
+    if (tabParam !== null && !(VALID_TABS as readonly string[]).includes(tabParam)) {
+      return NextResponse.json({ error: "invalid_tab" }, { status: 400 });
+    }
+    const tab = tabParam as OperationsTab | null;
+    const sessionCompany =
+      session?.role === "company" && session.companyId ? session.companyId : null;
+    if (role === "company" && tab === null && (sessionCompany !== null || !isDemoMode())) {
+      return NextResponse.json({ error: "tab_required" }, { status: 400 });
+    }
+
+    const scopedCompanyId =
+      session?.role === "company" && session.companyId
+        ? session.companyId
+        : null;
+
+    await withTimeout(ensureAiOpsTables(), 15000, "operations schema check");
     const projectIdFilter = searchParams.get("projectId") ?? undefined;
 
     const demoTables = isDemoMode() ? getDemoTables() : null;
@@ -68,13 +168,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           "operations queries"
         );
     const [
-      companyRows,
-      projectRows,
-      milestoneRows,
-      candidateRows,
-      ndaRows,
-      meetingRows,
-      paymentRows,
+      rawCompanyRows,
+      rawProjectRows,
+      rawMilestoneRows,
+      rawCandidateRows,
+      rawNdaRows,
+      rawMeetingRows,
+      rawPaymentRows,
       approvalRows,
       proposalRows,
       verifRows,
@@ -96,6 +196,52 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           demoTables.disputes,
         ]
       : await liveRowsPromise!;
+
+    const companyRows = scopedCompanyId
+      ? rawCompanyRows.filter((c) => c.id === scopedCompanyId)
+      : rawCompanyRows;
+    const projectRows = scopedCompanyId
+      ? rawProjectRows.filter((p) => p.companyId === scopedCompanyId)
+      : rawProjectRows;
+    const allowedProjectIds = scopedCompanyId
+      ? new Set(projectRows.map((p) => p.id))
+      : null;
+    const milestoneRows = allowedProjectIds
+      ? rawMilestoneRows.filter((m) => allowedProjectIds.has(m.projectId))
+      : rawMilestoneRows;
+    const allowedMilestoneIds = allowedProjectIds
+      ? new Set(milestoneRows.map((m) => m.id))
+      : null;
+    const candidateRows = allowedProjectIds
+      ? rawCandidateRows.filter((c) => allowedProjectIds.has(c.projectId))
+      : rawCandidateRows;
+    const ndaRows = allowedProjectIds
+      ? rawNdaRows.filter((n) => allowedProjectIds.has(n.projectId))
+      : rawNdaRows;
+    const meetingRows = allowedProjectIds
+      ? rawMeetingRows.filter((m) => allowedProjectIds.has(m.projectId))
+      : rawMeetingRows;
+    const paymentRows = allowedMilestoneIds
+      ? rawPaymentRows.filter((p) => p.milestoneId && allowedMilestoneIds.has(p.milestoneId))
+      : rawPaymentRows;
+    const allowedPaymentIds = allowedMilestoneIds
+      ? new Set(paymentRows.map((p) => p.id))
+      : null;
+    const scopedApprovalRows = allowedPaymentIds
+      ? approvalRows.filter((a) => allowedPaymentIds.has(a.paymentId))
+      : approvalRows;
+    const scopedProposalRows = allowedMilestoneIds
+      ? proposalRows.filter((pp) => allowedMilestoneIds.has(pp.milestoneId))
+      : proposalRows;
+    const scopedVerifRows = allowedMilestoneIds
+      ? verifRows.filter((vr) => allowedMilestoneIds.has(vr.milestoneId))
+      : verifRows;
+    const scopedExecRows = allowedProjectIds
+      ? execRows.filter((e) => e.projectId !== null && allowedProjectIds.has(e.projectId))
+      : execRows;
+    const scopedDisputeRows = allowedMilestoneIds
+      ? disputeRows.filter((d) => d.milestoneId && allowedMilestoneIds.has(d.milestoneId))
+      : disputeRows;
 
     const companyMap = new Map(companyRows.map((c) => [c.id, c]));
     const projectMap = new Map(projectRows.map((p) => [p.id, p]));
@@ -204,8 +350,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           isLocked,
           version: m.version,
           position: m.position,
-          paypalOrderId: m.paypalOrderId ?? null,
-          paypalPayoutBatchId: m.paypalPayoutBatchId ?? null,
+          // PayPal ids are emitted only on the payments tab (authorized
+          // audience); the tasks tab never carries them.
         };
       });
 
@@ -247,12 +393,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           projectTitle: proj?.title ?? n.projectId,
           candidateId: n.candidateId,
           candidateName: cand?.name ?? n.candidateId,
-          candidateEmail: cand?.email ?? "—",
           templateVersion: n.templateVersion ?? "v1.0-mutual-nda",
           status: n.status,
           acceptedName: n.acceptedName ?? "—",
           acceptedAt: n.acceptedAt?.toISOString() ?? null,
-          documentHash: n.documentHash ?? n.contentHash ?? "—",
+          documentHash: redactDocumentHash(n.documentHash ?? n.contentHash),
           meetingStatus: meeting?.status ?? "not_scheduled",
           meetingScheduledAt: meeting?.scheduledAt?.toISOString() ?? null,
           expiresAt: n.expiresAt?.toISOString() ?? null,
@@ -271,8 +416,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         const ms = milestoneMap.get(pay.milestoneId);
         const proj = ms ? projectMap.get(ms.projectId) : null;
         const cand = pay.candidateId ? candidateMap.get(pay.candidateId) : null;
-        const approval = approvalRows.find((a) => a.paymentId === pay.id);
-        const proposal = proposalRows.find((pp) => pp.milestoneId === pay.milestoneId);
+        const approval = scopedApprovalRows.find((a) => a.paymentId === pay.id);
+        const proposal = scopedProposalRows.find((pp) => pp.milestoneId === pay.milestoneId);
 
         return {
           id: pay.id,
@@ -300,7 +445,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
     // 7. Agent Executions Grid Rows
     const executionsGrid = [
-      ...execRows.map((e) => ({
+      ...scopedExecRows.map((e) => ({
         id: e.id,
         source: "supervisor_orchestrator",
         projectId: e.projectId ?? "—",
@@ -319,7 +464,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         finalResult: e.finalResult,
         createdAt: e.createdAt.toISOString(),
       })),
-      ...verifRows.map((vr) => {
+      ...scopedVerifRows.map((vr) => {
         const ms = milestoneMap.get(vr.milestoneId);
         return {
           id: vr.id,
@@ -341,7 +486,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       }),
     ];
 
-    return NextResponse.json({
+    const grids = {
       consultants: consultantsGrid,
       projects: projectsGrid,
       tasks: tasksGrid,
@@ -349,8 +494,21 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       contracts: contractsGrid,
       payments: paymentsGrid,
       executions: executionsGrid,
-      disputesCount: disputeRows.length,
-    });
+    };
+    if (tab === null) {
+      return NextResponse.json({
+        ...grids,
+        disputesCount: scopedDisputeRows.length,
+      });
+    }
+    if (tab === "companies") {
+      return NextResponse.json({
+        tab,
+        companies: grids.companies,
+        disputesCount: scopedDisputeRows.length,
+      });
+    }
+    return NextResponse.json({ tab, [tab]: grids[tab] });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[/api/operations/data GET] Error:", message);
@@ -369,14 +527,30 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
  */
 export async function PATCH(req: NextRequest): Promise<NextResponse> {
   try {
-    const role = await getRoleFromCookie(req.headers.get("cookie"));
+    const patchCookieHeader = req.headers.get("cookie") ?? null;
+    const patchSession = await getSessionFromCookie(patchCookieHeader);
+    const role = patchSession?.role ?? (await getRoleFromCookie(patchCookieHeader));
     // Server-side authorization: company/admin only. The freelancer role is
-    // read-only and unauthenticated traffic cannot mutate (read-only GET
-    // remains open for shared demo links).
+    // read-only and unauthenticated traffic cannot mutate.
     if (role !== "company" && role !== "admin") {
       return NextResponse.json(
         { error: "Forbidden: editing operations requires the company or admin role." },
         { status: 403 }
+      );
+    }
+
+    // Live mode: company callers need a verified session (D.3 — a bare role
+    // cookie must never authorize company mutations).
+    if (!companySessionAllowsLiveAccess(role, patchSession)) {
+      return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+    }
+
+    const patchIp = getIp(req);
+    const patchLimit = checkRateLimit("ops-patch", patchIp, 60, 60);
+    if (!patchLimit.ok) {
+      return NextResponse.json(
+        { error: "Rate limit exceeded" },
+        { status: 429, headers: { "Retry-After": String(patchLimit.retryAfterSec) } }
       );
     }
 
@@ -385,12 +559,18 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     const id = body?.id as string | undefined;
     const updates = body?.updates as Record<string, unknown> | undefined;
 
-    if (!entity || !id || !updates) {
+    if (!entity || !id || !updates ||
+        (entity !== "task" && entity !== "consultant" && entity !== "project") ||
+        typeof id !== "string" || id.length > 100 ||
+        typeof updates !== "object" || Array.isArray(updates)) {
       return NextResponse.json(
         { error: "entity, id, and updates are required." },
         { status: 400 }
       );
     }
+    const patchActor = patchSession
+      ? `${patchSession.role}:${patchSession.userId}`
+      : `${role ?? "company"}-operator`;
 
     if (isDemoMode()) {
       const { getDemoTables } = await import("@/lib/demo/store");
@@ -399,6 +579,12 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         const existing = t.milestones.find((m) => m.id === id);
         if (!existing) {
           return NextResponse.json({ error: "Task/Milestone not found." }, { status: 404 });
+        }
+        if (patchSession?.role === "company" && patchSession.companyId) {
+          const demoProject = t.projects.find((p) => p.id === existing.projectId);
+          if (!demoProject || demoProject.companyId !== patchSession.companyId) {
+            return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+          }
         }
         if (
           (existing.status === "funded" || existing.status === "paid") &&
@@ -431,7 +617,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           entityType: "milestone",
           entityId: id,
           event: "AG_GRID_INLINE_TASK_UPDATED",
-          actor: `${role ?? "company"}-operator`,
+          actor: patchActor,
           payload: updates,
         });
         return NextResponse.json({ ok: true, entity, id, updates, simulated: true });
@@ -441,16 +627,26 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         if (!existing) {
           return NextResponse.json({ error: "Consultant not found." }, { status: 404 });
         }
-        if (updates.rank !== undefined) {
-          const r = Number(updates.rank);
-          if (Number.isInteger(r) && r >= 1 && r <= 100) existing.rank = r;
+        if (patchSession?.role === "company" && patchSession.companyId) {
+          const demoProject = t.projects.find((p) => p.id === existing.projectId);
+          if (!demoProject || demoProject.companyId !== patchSession.companyId) {
+            return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+          }
+        }
+        const validated = validateConsultantUpdates(updates);
+        if (validated.error) {
+          return NextResponse.json({ error: validated.error }, { status: 400 });
+        }
+        if (validated.rank !== undefined) existing.rank = validated.rank;
+        if (validated.status !== undefined) {
+          existing.status = validated.status as typeof existing.status;
         }
         existing.updatedAt = new Date();
         await writeAuditLog({
           entityType: "candidate",
           entityId: id,
           event: "AG_GRID_INLINE_CONSULTANT_UPDATED",
-          actor: `${role ?? "company"}-operator`,
+          actor: patchActor,
           payload: updates,
         });
         return NextResponse.json({ ok: true, entity, id, updates, simulated: true });
@@ -459,6 +655,10 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         const existing = t.projects.find((p) => p.id === id);
         if (!existing) {
           return NextResponse.json({ error: "Project not found." }, { status: 404 });
+        }
+        if (patchSession?.role === "company" && patchSession.companyId &&
+            existing.companyId !== patchSession.companyId) {
+          return NextResponse.json({ error: "Forbidden" }, { status: 403 });
         }
         if (typeof updates.title === "string" && updates.title.trim().length > 0) {
           existing.title = updates.title.trim();
@@ -474,7 +674,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           entityType: "project",
           entityId: id,
           event: "AG_GRID_INLINE_PROJECT_UPDATED",
-          actor: `${role ?? "company"}-operator`,
+          actor: patchActor,
           payload: updates,
         });
         return NextResponse.json({ ok: true, entity, id, updates, simulated: true });
@@ -491,6 +691,17 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
 
       if (!existing) {
         return NextResponse.json({ error: "Task/Milestone not found." }, { status: 404 });
+      }
+
+      if (patchSession?.role === "company" && patchSession.companyId) {
+        const [taskProject] = await db
+          .select({ companyId: projects.companyId })
+          .from(projects)
+          .where(eq(projects.id, existing.projectId))
+          .limit(1);
+        if (!taskProject || taskProject.companyId !== patchSession.companyId) {
+          return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+        }
       }
 
       if (
@@ -536,7 +747,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         entityType: "milestone",
         entityId: id,
         event: "AG_GRID_INLINE_TASK_UPDATED",
-        actor: `${role ?? "company"}-operator`,
+        actor: patchActor,
         payload: updates,
       });
 
@@ -544,16 +755,31 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     }
 
     if (entity === "consultant") {
-      const patchValues: Record<string, unknown> = { updatedAt: new Date() };
-      if (updates.rank !== undefined) {
-        const r = Number(updates.rank);
-        if (Number.isInteger(r) && r >= 1 && r <= 100) {
-          patchValues.rank = r;
+      if (patchSession?.role === "company" && patchSession.companyId) {
+        const [consultantRow] = await db
+          .select({ projectId: candidates.projectId })
+          .from(candidates)
+          .where(eq(candidates.id, id))
+          .limit(1);
+        const [consultantProject] = consultantRow
+          ? await db
+              .select({ companyId: projects.companyId })
+              .from(projects)
+              .where(eq(projects.id, consultantRow.projectId))
+              .limit(1)
+          : [];
+        if (!consultantRow || !consultantProject ||
+            consultantProject.companyId !== patchSession.companyId) {
+          return NextResponse.json({ error: "Forbidden" }, { status: 403 });
         }
       }
-      if (typeof updates.status === "string") {
-        patchValues.status = updates.status;
+      const validated = validateConsultantUpdates(updates);
+      if (validated.error) {
+        return NextResponse.json({ error: validated.error }, { status: 400 });
       }
+      const patchValues: Record<string, unknown> = { updatedAt: new Date() };
+      if (validated.rank !== undefined) patchValues.rank = validated.rank;
+      if (validated.status !== undefined) patchValues.status = validated.status;
 
       await db.update(candidates).set(patchValues).where(eq(candidates.id, id));
 
@@ -561,7 +787,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         entityType: "candidate",
         entityId: id,
         event: "AG_GRID_INLINE_CONSULTANT_UPDATED",
-        actor: `${role ?? "company"}-operator`,
+        actor: patchActor,
         payload: updates,
       });
 
@@ -569,6 +795,16 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     }
 
     if (entity === "project") {
+      if (patchSession?.role === "company" && patchSession.companyId) {
+        const [projectRow] = await db
+          .select({ companyId: projects.companyId })
+          .from(projects)
+          .where(eq(projects.id, id))
+          .limit(1);
+        if (!projectRow || projectRow.companyId !== patchSession.companyId) {
+          return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+        }
+      }
       const patchValues: Record<string, unknown> = { updatedAt: new Date() };
       if (typeof updates.title === "string" && updates.title.trim().length > 0) {
         patchValues.title = updates.title.trim();
@@ -586,7 +822,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         entityType: "project",
         entityId: id,
         event: "AG_GRID_INLINE_PROJECT_UPDATED",
-        actor: `${role ?? "company"}-operator`,
+        actor: patchActor,
         payload: updates,
       });
 

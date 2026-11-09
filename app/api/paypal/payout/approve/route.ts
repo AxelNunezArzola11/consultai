@@ -17,7 +17,7 @@ import { eq } from "drizzle-orm";
 
 import { paypalFetch, safeJson, getAccessToken } from "@/lib/paypal/client";
 import { db } from "@/lib/db";
-import { approvals, payments, milestones } from "@/lib/db/schema";
+import { approvals, payments, milestones, projects } from "@/lib/db/schema";
 import {
   assertMilestoneTransition,
   assertPaymentTransition,
@@ -26,6 +26,7 @@ import {
 } from "@/lib/state-machines/milestone-payment";
 import { writeAuditLog } from "@/lib/db/audit";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { isDemoMode } from "@/lib/demo/config";
 import { demoBlocked } from "@/lib/demo/guard";
@@ -34,10 +35,18 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (isDemoMode()) return demoBlocked("PayPal payout approval");
-  // ── Auth: require role=company cookie ─────────────────────────────────────
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
-  if (role !== "company") {
-    return NextResponse.json({ error: "Forbidden: company role required" }, { status: 403 });
+  // ── Auth: require role=company or role=admin cookie ───────────────────────
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+  if (role !== "company" && role !== "admin") {
+    return NextResponse.json({ error: "Forbidden: company or admin role required" }, { status: 403 });
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
   }
 
   // ── Rate limit: 10 approvals per IP per 60 s ──────────────────────────────
@@ -56,11 +65,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const recipientEmail = body?.recipientEmail as string | undefined;
     const note           = (body?.note          as string | undefined) ?? "";
 
-    if (!approvalId || !recipientEmail) {
+    if (!approvalId || typeof approvalId !== "string" || approvalId.length > 100 ||
+        !recipientEmail || typeof recipientEmail !== "string" || recipientEmail.length > 320 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
       return NextResponse.json(
         { error: "approvalId and recipientEmail required" },
         { status: 400 }
       );
+    }
+    if (typeof note !== "string" || note.length > 2000) {
+      return NextResponse.json({ error: "invalid note" }, { status: 400 });
     }
 
     // Load approval
@@ -89,6 +103,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (!paymentRow) {
       return NextResponse.json({ error: "Payment not found" }, { status: 404 });
+    }
+
+    if (session?.role === "company" && session.companyId && paymentRow.milestoneId) {
+      const [milestone] = await db
+        .select({ projectId: milestones.projectId })
+        .from(milestones)
+        .where(eq(milestones.id, paymentRow.milestoneId))
+        .limit(1);
+      const [project] = milestone
+        ? await db
+            .select({ companyId: projects.companyId })
+            .from(projects)
+            .where(eq(projects.id, milestone.projectId))
+            .limit(1)
+        : [];
+      if (!milestone || !project || project.companyId !== session.companyId) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
     }
 
     const netUsd = paymentRow.netUsd;

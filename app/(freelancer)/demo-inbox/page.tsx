@@ -4,12 +4,14 @@ export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { db } from "@/lib/db";
 import { ndas, candidates, projects } from "@/lib/db/schema";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { InviteLinkManager } from "./InviteLinkManager";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { requirePageRole, candidateIdsForFreelancer } from "@/lib/auth/guards";
+import { redirect } from "next/navigation";
 
 /**
  * Demo Inbox — server component.
@@ -23,13 +25,61 @@ import { getDemoTables } from "@/lib/demo/store";
  * once to the operator. No token hashes are exposed as links.
  */
 export default async function DemoInboxPage() {
+  // Authenticate + authorize BEFORE querying/rendering (demo bypass: fixtures only).
+  const auth = await requirePageRole(["company", "freelancer", "admin"]);
+  if (!auth.demoBypass && !auth.session) {
+    // Live session-less holder: no verified identity to scope invitations
+    // to — re-authenticate instead of serving the unscoped inbox.
+    redirect("/login");
+  }
   const demoTables = isDemoMode() ? getDemoTables() : null;
-  const pendingNdas = demoTables
-    ? demoTables.ndas.filter((n) => n.status === "sent")
-    : await db
-        .select()
-        .from(ndas)
-        .where(eq(ndas.status, "sent"));
+  // Live NDA isolation: company sessions see their own projects' NDAs only;
+  // freelancer sessions see their own candidacies' NDAs only; admin sees all.
+  let pendingNdas: Array<typeof ndas.$inferSelect> = [];
+  if (demoTables) {
+    pendingNdas = demoTables.ndas.filter((n) => n.status === "sent");
+  } else if (
+    auth.session?.role === "company" &&
+    auth.session.companyId &&
+    !auth.demoBypass
+  ) {
+    const ownProjectIds = (
+      await db
+        .select({ id: projects.id })
+        .from(projects)
+        .where(eq(projects.companyId, auth.session.companyId))
+    ).map((r) => r.id);
+    pendingNdas =
+      ownProjectIds.length > 0
+        ? await db
+            .select()
+            .from(ndas)
+            .where(
+              and(
+                eq(ndas.status, "sent"),
+                inArray(ndas.projectId, ownProjectIds)
+              )
+            )
+        : [];
+  } else if (auth.session?.role === "freelancer" && !auth.demoBypass) {
+    const assigned = await candidateIdsForFreelancer(auth);
+    pendingNdas =
+      assigned === null
+        ? await db.select().from(ndas).where(eq(ndas.status, "sent"))
+        : assigned.length > 0
+          ? await db
+              .select()
+              .from(ndas)
+              .where(
+                and(
+                  eq(ndas.status, "sent"),
+                  inArray(ndas.candidateId, assigned)
+                )
+              )
+          : [];
+  } else if (!demoTables) {
+    pendingNdas = await db.select().from(ndas).where(eq(ndas.status, "sent"));
+  }
 
   // Fetch candidate names for display
   const candidateIds = pendingNdas.map((n) => n.candidateId);

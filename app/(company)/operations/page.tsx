@@ -9,6 +9,7 @@ import EnterpriseOperationsGrids, {
   type OperationsGridTab,
 } from "@/components/operations/EnterpriseOperationsGrids";
 import { isDemoMode } from "@/lib/demo/config";
+import { requirePageRole } from "@/lib/auth/guards";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,8 @@ export default async function OperationsPage({
   searchParams?: Promise<{ tab?: string }>;
 }) {
   const params = searchParams ? await searchParams : {};
+  // Authenticate + authorize BEFORE rendering (grid data comes from the hardened API).
+  await requirePageRole(["company", "admin"]);
   const rawTab = (params.tab ?? "tasks").toLowerCase() as OperationsGridTab;
   const initialTab = VALID_TABS.includes(rawTab) ? rawTab : "tasks";
 

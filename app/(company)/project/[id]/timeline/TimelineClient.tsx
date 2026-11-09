@@ -13,6 +13,7 @@
  */
 
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 import type { GanttMilestone } from "@/components/canvas/GanttPanel";
 import { VettingAIHarness } from "@/components/agent/VettingAIHarness";
@@ -161,7 +162,9 @@ interface Props {
 }
 
 export function TimelineClient({ projectId, milestones }: Props) {
+  const router = useRouter();
   const [versionMap, setVersionMap] = useState<Record<string, number>>({});
+  const [savedDates, setSavedDates] = useState<Record<string, string>>({});
   // AI smart reschedule overlay — milestones with AI-proposed dates (not yet saved)
   const [aiOverride, setAiOverride] = useState<Record<string, { startDate: string | null; dueDate: string | null }>>({});
 
@@ -170,16 +173,19 @@ export function TimelineClient({ projectId, milestones }: Props) {
     return {
       ...m,
       version:   versionMap[m.id] ?? m.version,
-      startDate: override?.startDate !== undefined ? override.startDate : m.startDate,
+      startDate: override?.startDate !== undefined ? override.startDate : (savedDates[m.id] ?? m.startDate),
       dueDate:   override?.dueDate   !== undefined ? override.dueDate   : m.dueDate,
     };
   });
 
   const handleReschedule = useCallback(
-    (milestoneId: string, _newStartDate: string, newVersion: number) => {
+    (milestoneId: string, newStartDate: string, newVersion: number) => {
       setVersionMap((prev) => ({ ...prev, [milestoneId]: newVersion }));
+      setSavedDates((prev) => ({ ...prev, [milestoneId]: newStartDate }));
+      // Revalidate server data so bars, Gantt, and lists reconcile.
+      router.refresh();
     },
-    []
+    [router]
   );
 
   // Handle AI smart-reschedule — apply the proposed dates as an optimistic overlay

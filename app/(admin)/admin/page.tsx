@@ -21,6 +21,7 @@ import { ensureAiOpsTables } from "@/lib/ai-ops/orchestrator-engine";
 import { desc } from "drizzle-orm";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { requirePageRole } from "@/lib/auth/guards";
 
 /**
  * Administrator Governance Dashboard — Section 9 Differentiated Administrator Experience
@@ -34,6 +35,8 @@ import { getDemoTables } from "@/lib/demo/store";
  * - Security and append-only audit information (`audit_log`)
  */
 export default async function AdminDashboardPage() {
+  // Admin-only: authenticate + authorize BEFORE querying/rendering.
+  await requirePageRole(["admin"]);
   await ensureAiOpsTables();
 
   const demoTables = isDemoMode() ? getDemoTables() : null;
@@ -131,20 +134,18 @@ export default async function AdminDashboardPage() {
         deliverPath={deliverMilestone ? `/deliver/${deliverMilestone.id}` : null}
       />
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900/90 px-6 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800/80 pb-5">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="rounded bg-purple-500/20 px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase text-purple-300">
-              Platform Governance &amp; Security Audit
-            </span>
-            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-400">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-2xl font-bold tracking-tight text-white">
+              Administrator Control &amp; Compliance Center
+            </h1>
+            <span className="inline-flex items-center gap-1.5 rounded border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[11px] font-medium text-emerald-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
               Append-Only Audit Trigger Active
             </span>
           </div>
-          <h1 className="mt-1 text-2xl font-bold text-white">
-            Administrator Control &amp; Compliance Center
-          </h1>
-          <p className="text-xs text-slate-400">
+          <p className="mt-1 text-xs text-slate-400">
             Real-time oversight of companies, consultants, PayPal transactions, disputes, AI agent executions, and immutable audit logs.
           </p>
         </div>
@@ -152,77 +153,77 @@ export default async function AdminDashboardPage() {
         <div className="flex items-center gap-2">
           <Link
             href="/ai-ops"
-            className="rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500"
+            className="rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-blue-500"
           >
-            ✦ AI Operations Center
+            AI Operations Center
           </Link>
           <Link
             href="/operations"
-            className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+            className="rounded-lg border border-slate-700 bg-slate-900 px-3.5 py-2 text-xs font-medium text-slate-200 transition hover:bg-slate-800"
           >
-            ⊞ All 7 Operational Grids
+            All 7 Operational Grids
           </Link>
         </div>
       </div>
 
-      {/* 6 Admin KPI Cards */}
-      <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-6">
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-4">
-          <div className="text-[11px] text-slate-400">Registered Companies</div>
-          <div className="mt-1 font-mono text-2xl font-bold text-white">
+      {/* 6 Admin KPI Cards — 1px Hairline Strip */}
+      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-800 bg-slate-800 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="bg-[#0f141e] p-4">
+          <div className="text-[11px] font-medium text-slate-400">Registered Companies</div>
+          <div className="mt-1.5 font-mono text-2xl font-bold tabular-nums text-white">
             {companyRows.length}
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">
+          <div className="mt-1 text-[11px] text-slate-400">
             {projectRows.length} total projects
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-4">
-          <div className="text-[11px] text-slate-400">Vetted Consultants</div>
-          <div className="mt-1 font-mono text-2xl font-bold text-blue-400">
+        <div className="bg-[#0f141e] p-4">
+          <div className="text-[11px] font-medium text-slate-400">Vetted Consultants</div>
+          <div className="mt-1.5 font-mono text-2xl font-bold tabular-nums text-blue-400">
             {candidateRows.length}
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">
+          <div className="mt-1 text-[11px] text-slate-400">
             Active talent pool
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-4">
-          <div className="text-[11px] text-slate-400">Transaction Volume</div>
-          <div className="mt-1 font-mono text-2xl font-bold text-emerald-400">
+        <div className="bg-[#0f141e] p-4">
+          <div className="text-[11px] font-medium text-slate-400">Transaction Volume</div>
+          <div className="mt-1.5 font-mono text-2xl font-bold tabular-nums text-emerald-400">
             ${totalVolumeUsd.toLocaleString("en-US", { maximumFractionDigits: 0 })}
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">
+          <div className="mt-1 text-[11px] text-slate-400">
             {paymentRows.length} payment ledger rows
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-4">
-          <div className="text-[11px] text-slate-400">PayPal Disputes</div>
-          <div className="mt-1 font-mono text-2xl font-bold text-rose-400">
+        <div className="bg-[#0f141e] p-4">
+          <div className="text-[11px] font-medium text-slate-400">PayPal Disputes</div>
+          <div className="mt-1.5 font-mono text-2xl font-bold tabular-nums text-rose-400">
             {disputeRows.length}
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">
+          <div className="mt-1 text-[11px] text-slate-400">
             {webhookRows.length} webhook deliveries
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-4">
-          <div className="text-[11px] text-slate-400">AI Executions</div>
-          <div className="mt-1 font-mono text-2xl font-bold text-purple-400">
+        <div className="bg-[#0f141e] p-4">
+          <div className="text-[11px] font-medium text-slate-400">AI Executions</div>
+          <div className="mt-1.5 font-mono text-2xl font-bold tabular-nums text-cyan-400">
             {execRows.length + verifRows.length}
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">
+          <div className="mt-1 text-[11px] text-slate-400">
             Supervisor + Delivery runs
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-4">
-          <div className="text-[11px] text-slate-400">Audit Log Events</div>
-          <div className="mt-1 font-mono text-2xl font-bold text-amber-400">
+        <div className="bg-[#0f141e] p-4">
+          <div className="text-[11px] font-medium text-slate-400">Audit Log Events</div>
+          <div className="mt-1.5 font-mono text-2xl font-bold tabular-nums text-amber-400">
             {auditRows.length}+
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">
+          <div className="mt-1 text-[11px] text-slate-400">
             Immutable DB records
           </div>
         </div>
@@ -231,37 +232,37 @@ export default async function AdminDashboardPage() {
       {/* Disputes & Transactions Grid */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Disputes */}
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div className="rounded-xl border border-slate-800 bg-[#0f141e] p-5">
+          <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
             <div>
-              <h2 className="text-sm font-bold text-white">
+              <h2 className="text-sm font-bold tracking-tight text-white">
                 Disputes &amp; Chargeback Governance
               </h2>
               <p className="text-[11px] text-slate-400">
                 Connected to `disputes` table and PayPal Disputes Webhook state.
               </p>
             </div>
-            <span className="font-mono text-xs text-rose-400">
+            <span className="font-mono text-xs tabular-nums text-rose-400">
               {disputeRows.length} records
             </span>
           </div>
 
           <div className="mt-3 max-h-72 space-y-2 overflow-y-auto">
             {disputeRows.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-500">
+              <div className="py-8 text-center text-xs text-slate-400">
                 Zero active disputes in database. All milestone transactions are in good standing.
               </div>
             ) : (
               disputeRows.map((d) => (
                 <div
                   key={d.id}
-                  className="rounded-xl border border-rose-500/30 bg-slate-950/80 p-3 text-xs"
+                  className="rounded-lg border border-rose-500/30 bg-[#090c12]/80 p-3 text-xs"
                 >
                   <div className="flex items-center justify-between">
                     <span className="font-mono font-bold text-rose-300">
                       {d.paypalDisputeId ?? d.id}
                     </span>
-                    <span className="rounded bg-rose-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-rose-300">
+                    <span className="rounded border border-rose-500/30 bg-rose-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase text-rose-300">
                       {d.status} ({d.evidenceStatus})
                     </span>
                   </div>
@@ -276,44 +277,44 @@ export default async function AdminDashboardPage() {
         </div>
 
         {/* AI Execution Monitoring */}
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div className="rounded-xl border border-slate-800 bg-[#0f141e] p-5">
+          <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
             <div>
-              <h2 className="text-sm font-bold text-white">
+              <h2 className="text-sm font-bold tracking-tight text-white">
                 AI Execution &amp; Human Gate Monitoring
               </h2>
               <p className="text-[11px] text-slate-400">
                 Live multi-agent traces and approval gate compliance.
               </p>
             </div>
-            <Link href="/ai-ops" className="text-xs text-blue-400 hover:underline">
+            <Link href="/ai-ops" className="text-xs font-medium text-blue-400 hover:underline">
               Full Console →
             </Link>
           </div>
 
           <div className="mt-3 max-h-72 space-y-2 overflow-y-auto">
             {execRows.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-500">
+              <div className="py-8 text-center text-xs text-slate-400">
                 No Supervisor executions recorded yet.
               </div>
             ) : (
               execRows.slice(0, 8).map((ex) => (
                 <div
                   key={ex.id}
-                  className="rounded-xl border border-slate-800 bg-slate-950/80 p-3 text-xs"
+                  className="rounded-lg border border-slate-800/90 bg-[#090c12]/80 p-3 text-xs"
                 >
                   <div className="flex items-center justify-between">
                     <span className="font-mono font-semibold text-blue-400">
                       {ex.id}
                     </span>
-                    <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] uppercase text-slate-300">
+                    <span className="rounded border border-slate-700/80 bg-slate-900 px-2 py-0.5 font-mono text-[10px] uppercase text-slate-300">
                       {ex.status} • Gate: {ex.approvalStatus}
                     </span>
                   </div>
                   <div className="mt-1 line-clamp-1 text-slate-200">
                     {ex.userRequest}
                   </div>
-                  <div className="mt-1 font-mono text-[10px] text-slate-500">
+                  <div className="mt-1 font-mono text-[10px] tabular-nums text-slate-400">
                     Intent: {ex.intent} • {ex.durationMs}ms • {ex.totalTokens} tokens
                   </div>
                 </div>
@@ -324,24 +325,24 @@ export default async function AdminDashboardPage() {
       </div>
 
       {/* Append-Only Security & Audit Log Viewer */}
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+      <div className="rounded-xl border border-slate-800 bg-[#0f141e] p-5">
+        <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
           <div>
-            <h2 className="text-sm font-bold text-white">
+            <h2 className="text-sm font-bold tracking-tight text-white">
               Append-Only Security &amp; Operational Audit Log (`audit_log`)
             </h2>
             <p className="text-[11px] text-slate-400">
               Enforced by PostgreSQL trigger (`0001_audit_log_append_only_trigger.sql`) — rows can never be updated or deleted.
             </p>
           </div>
-          <span className="font-mono text-xs text-slate-400">
+          <span className="font-mono text-xs tabular-nums text-slate-400">
             Showing latest {auditRows.length} entries
           </span>
         </div>
 
         <div className="mt-3 max-h-96 overflow-y-auto">
           <table className="w-full text-left text-xs">
-            <thead className="border-b border-slate-800 text-[10px] uppercase text-slate-400">
+            <thead className="border-b border-slate-800 font-mono text-[10px] uppercase text-slate-400">
               <tr>
                 <th className="py-2 pr-3">ID</th>
                 <th className="py-2 pr-3">Event</th>
@@ -352,8 +353,8 @@ export default async function AdminDashboardPage() {
             </thead>
             <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
               {auditRows.map((row) => (
-                <tr key={String(row.id)} className="hover:bg-slate-950/60">
-                  <td className="py-2 pr-3 text-slate-400">#{String(row.id)}</td>
+                <tr key={String(row.id)} className="hover:bg-[#090c12]/60">
+                  <td className="py-2 pr-3 tabular-nums text-slate-400">#{String(row.id)}</td>
                   <td className="py-2 pr-3 font-semibold text-emerald-400">
                     {row.event}
                   </td>
@@ -361,7 +362,7 @@ export default async function AdminDashboardPage() {
                     {row.entityType}:{row.entityId}
                   </td>
                   <td className="py-2 pr-3 text-blue-300">{row.actor}</td>
-                  <td className="py-2 pr-3 text-slate-500">
+                  <td className="py-2 pr-3 tabular-nums text-slate-400">
                     {row.createdAt.toISOString()}
                   </td>
                 </tr>

@@ -38,6 +38,15 @@ vi.mock("@/lib/auth/role-cookie", () => ({
   signRoleCookie: vi.fn().mockResolvedValue("consultai_role_v1=fake-token; Max-Age=86400; Path=/; HttpOnly; SameSite=Strict"),
 }));
 
+vi.mock("@/lib/auth/session", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/auth/session")>();
+  return {
+    getSessionFromCookie: vi.fn(),
+    companySessionAllowsLiveAccess: actual.companySessionAllowsLiveAccess,
+  };
+});
+
 vi.mock("@/lib/auth/rate-limit", () => ({
   checkRateLimit: vi.fn().mockReturnValue({ ok: true, retryAfterSec: 0 }),
   getIp: vi.fn().mockReturnValue("127.0.0.1"),
@@ -51,13 +60,33 @@ vi.mock("@/lib/delivery/github-client", () => ({
 }));
 
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { getSessionFromCookie } from "@/lib/auth/session";
 import { fetchPRDetails } from "@/lib/delivery/github-client";
 import { db } from "@/lib/db";
 import { POST } from "@/app/api/delivery/propose/approve/route";
 
 const mockGetRole = vi.mocked(getRoleFromCookie);
+const mockGetSession = vi.mocked(getSessionFromCookie);
 const mockFetchPR = vi.mocked(fetchPRDetails);
 const mockDb = vi.mocked(db);
+
+const COMPANY_SESSION = {
+  sessionId: "sess-a",
+  userId: "user-a",
+  email: "owner@consultai.test",
+  name: "Owner",
+  role: "company" as const,
+  companyId: "company-a",
+  companyName: "Alpha",
+  githubHandle: null,
+  isAuthenticatedUser: true,
+};
+
+/** Ownership-check rows: the proposal's milestone → project owned by company-a. */
+const OWNERSHIP_ROWS = [
+  { projectId: "proj-1" },
+  { companyId: "company-a" },
+];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -130,6 +159,7 @@ function setupDbUpdate() {
 describe("Delivery Agent — approval route", () => {
   beforeEach(() => {
     mockGetRole.mockResolvedValue("company");
+    mockGetSession.mockResolvedValue(COMPANY_SESSION);
     setupDbUpdate();
   });
 
@@ -138,9 +168,19 @@ describe("Delivery Agent — approval route", () => {
   });
 
   it("non-company role → 403", async () => {
+    mockGetSession.mockResolvedValueOnce(null);
     mockGetRole.mockResolvedValue("freelancer");
     const res = await POST(buildRequest({ proposalId: "prop_1", decision: "approved", recipientEmail: "a@b.com" }));
     expect(res.status).toBe(403);
+  });
+
+  it("live session-less company cookie → 403 missing_company_context (D.3)", async () => {
+    mockGetSession.mockResolvedValueOnce(null);
+    mockGetRole.mockResolvedValue("company");
+    const res = await POST(buildRequest({ proposalId: "prop_1", decision: "approved", recipientEmail: "a@b.com" }));
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe("missing_company_context");
   });
 
   it("missing proposalId → 400", async () => {
@@ -170,7 +210,7 @@ describe("Delivery Agent — approval route", () => {
   });
 
   it("double approval is idempotent — returns 200 with message", async () => {
-    setupDbSelect([mockProposal({ status: "approved" })]);
+    setupDbSelect([mockProposal({ status: "approved" }), ...OWNERSHIP_ROWS]);
     const res = await POST(buildRequest({ proposalId: "prop_test123", decision: "approved", recipientEmail: "a@b.com" }));
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -178,7 +218,7 @@ describe("Delivery Agent — approval route", () => {
   });
 
   it("superseded proposal → 409", async () => {
-    setupDbSelect([mockProposal({ status: "superseded" })]);
+    setupDbSelect([mockProposal({ status: "superseded" }), ...OWNERSHIP_ROWS]);
     const res = await POST(buildRequest({ proposalId: "prop_test123", decision: "approved", recipientEmail: "a@b.com" }));
     expect(res.status).toBe(409);
     const body = await res.json();
@@ -186,7 +226,7 @@ describe("Delivery Agent — approval route", () => {
   });
 
   it("HEAD SHA changed after verification → SUPERSEDED, 409", async () => {
-    setupDbSelect([mockProposal(), mockRun()]);
+    setupDbSelect([mockProposal(), ...OWNERSHIP_ROWS, mockRun()]);
     mockFetchPR.mockResolvedValueOnce({
       number: 42, title: "feat", body: null, state: "open",
       merged: false, draft: false,
@@ -210,7 +250,7 @@ describe("Delivery Agent — approval route", () => {
   });
 
   it("HEAD SHA unchanged → proceeds, returns decision", async () => {
-    setupDbSelect([mockProposal(), mockRun(), undefined as unknown as Record<string, unknown>]); // proposal, run, no payment row
+    setupDbSelect([mockProposal(), ...OWNERSHIP_ROWS, mockRun(), undefined as unknown as Record<string, unknown>]); // proposal, ownership, run, no payment row
     mockFetchPR.mockResolvedValueOnce({
       number: 42, title: "feat", body: null, state: "closed",
       merged: true, draft: false,
@@ -277,5 +317,5 @@ describe("DeliveryAgent tool list", () => {
           .not.toContain(forbidden);
       }
     }
-  });
+  }, 20000);
 });

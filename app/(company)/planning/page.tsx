@@ -25,6 +25,8 @@ import { ensureAiOpsTables } from "@/lib/ai-ops/orchestrator-engine";
 import { desc, eq } from "drizzle-orm";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { requirePageRole, requireProjectAccess, scopedCompanyId } from "@/lib/auth/guards";
+import { isMilestoneTask } from "@/lib/gantt/bryntum-config";
 
 export const dynamic = "force-dynamic";
 
@@ -35,18 +37,34 @@ function daysBetween(startIso: string, endIso: string): number {
   return Math.max(1, Math.round((e - s) / 86400000));
 }
 
+// Module scope (outside render): default schedule anchor per milestone index.
+// Math is unchanged from the inline expression it replaces.
+function defaultStartForIndex(idx: number): string {
+  return new Date(Date.now() + idx * 5 * 86400000)
+    .toISOString()
+    .slice(0, 10);
+}
+
 export default async function PlanningPage({
   searchParams,
 }: {
   searchParams?: Promise<{ projectId?: string }>;
 }) {
   const resolvedParams = searchParams ? await searchParams : {};
+  // Authenticate + authorize BEFORE querying/rendering (demo bypass: fixtures only).
+  const auth = await requirePageRole(["company", "admin"]);
+  const scope = scopedCompanyId(auth);
+  if (!auth.demoBypass && scope && resolvedParams.projectId) {
+    // Explicit project param: verify ownership before any query (cross-company -> notFound).
+    await requireProjectAccess(resolvedParams.projectId);
+  }
   let projectOptions: PlanningProjectOption[] = [];
   let selectedProjectId: string | undefined = resolvedParams.projectId;
-  let tasks: GanttTask[] = [];
-  let dependencies: GanttDependency[] = [];
+  let tasks: GanttTask[] | undefined;
+  let dependencies: GanttDependency[] | undefined;
   let consultantResources: GanttConsultantResource[] = [];
   let initialProposal: SchedulingProposalPreview | null = null;
+  let loadError: string | null = null;
 
   try {
     await ensureAiOpsTables();
@@ -55,11 +73,18 @@ export default async function PlanningPage({
       ? [...demoTables.projects]
           .sort((a, b) => +b.createdAt - +a.createdAt)
           .slice(0, 30)
-      : await db
-          .select()
-          .from(projects)
-          .orderBy(desc(projects.createdAt))
-          .limit(30);
+      : scope
+        ? await db
+            .select()
+            .from(projects)
+            .where(eq(projects.companyId, scope))
+            .orderBy(desc(projects.createdAt))
+            .limit(30)
+        : await db
+            .select()
+            .from(projects)
+            .orderBy(desc(projects.createdAt))
+            .limit(30);
 
     projectOptions = allProjects.map((p) => ({
       id: p.id,
@@ -115,9 +140,7 @@ export default async function PlanningPage({
 
       const today = new Date().toISOString().slice(0, 10);
       tasks = projMilestones.map((m, idx) => {
-        const defaultStart = new Date(Date.now() + idx * 5 * 86400000)
-          .toISOString()
-          .slice(0, 10);
+        const defaultStart = defaultStartForIndex(idx);
         const startDate = m.startDate ?? defaultStart;
         const endDate =
           m.dueDate ??
@@ -153,21 +176,22 @@ export default async function PlanningPage({
           budgetUsd: parseFloat(m.budgetUsd || "0"),
           assignedConsultantId: assignedCandidate?.id ?? null,
           assignedConsultantName: assignedCandidate?.name ?? null,
+          milestone: isMilestoneTask({ duration, startDate, endDate }),
           readOnly: m.status === "funded" || m.status === "paid",
           version: m.version,
           baselines: [{ startDate: startDate || today, endDate }],
         };
       });
 
-      // Build Finish-to-Start dependencies from dependsOnId or sequential order
+      // Finish-to-Start dependencies ONLY from explicit dependsOnId.
+      // No sequential fallback: invented links corrupt the critical path.
       dependencies = [];
-      for (let i = 0; i < projMilestones.length; i++) {
-        const m = projMilestones[i];
-        const fromId = m.dependsOnId ?? (i > 0 ? projMilestones[i - 1].id : null);
-        if (fromId) {
+      const milestoneIds = new Set(projMilestones.map((m) => m.id));
+      for (const m of projMilestones) {
+        if (m.dependsOnId && milestoneIds.has(m.dependsOnId)) {
           dependencies.push({
-            id: `dep-${fromId}-${m.id}`,
-            fromTask: fromId,
+            id: `dep-${m.dependsOnId}-${m.id}`,
+            fromTask: m.dependsOnId,
             toTask: m.id,
             type: 2,
           });
@@ -194,16 +218,28 @@ export default async function PlanningPage({
       }
     }
   } catch (err) {
-    console.warn("[/planning] Database query fallback:", err);
+    // Honest error state: surface the failure, never silent seed data.
+    console.warn("[/planning] Database query failed:", err);
+    loadError =
+      err instanceof Error
+        ? `Could not load the project schedule: ${err.message}`
+        : "Could not load the project schedule.";
+  }
+
+  // No-project / zero-milestone success path renders the empty panel (never seed).
+  if (!loadError) {
+    tasks ??= [];
+    dependencies ??= [];
   }
 
   const layoutProps: PlanningLayoutProps = {
     projectId: selectedProjectId,
     projectOptions,
-    initialTasks: tasks.length > 0 ? tasks : undefined,
-    initialDependencies: dependencies.length > 0 ? dependencies : undefined,
+    initialTasks: tasks,
+    initialDependencies: dependencies,
     initialConsultants: consultantResources,
     initialProposal,
+    loadError,
   };
 
   return (

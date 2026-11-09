@@ -284,8 +284,12 @@ export default function AiOperationsCenterClient({
           ).join(" → ")}`
         );
 
-        // Immediately refresh snapshot
-        const snapRes = await fetch("/api/ai-ops/executions", { cache: "no-store" });
+        // Immediately refresh snapshot (scoped to the selected project,
+        // matching the SSE stream scope).
+        const snapUrl = selectedProjectId
+          ? `/api/ai-ops/executions?projectId=${encodeURIComponent(selectedProjectId)}`
+          : "/api/ai-ops/executions";
+        const snapRes = await fetch(snapUrl, { cache: "no-store" });
         if (snapRes.ok) {
           const snapData = (await snapRes.json()) as AiOpsSnapshot;
           setSnapshot(snapData);
@@ -331,7 +335,10 @@ export default function AiOperationsCenterClient({
           } schedule adjustments applied).`
         );
 
-        const snapRes = await fetch("/api/ai-ops/executions", { cache: "no-store" });
+        const snapUrl = selectedProjectId
+          ? `/api/ai-ops/executions?projectId=${encodeURIComponent(selectedProjectId)}`
+          : "/api/ai-ops/executions";
+        const snapRes = await fetch(snapUrl, { cache: "no-store" });
         if (snapRes.ok) {
           const snapData = (await snapRes.json()) as AiOpsSnapshot;
           setSnapshot(snapData);
@@ -342,7 +349,7 @@ export default function AiOperationsCenterClient({
         );
       }
     },
-    []
+    [selectedProjectId]
   );
 
   // Aggregate operational KPIs
@@ -361,55 +368,52 @@ export default function AiOperationsCenterClient({
   );
 
   return (
-    <div className="flex min-h-[calc(100vh-80px)] flex-col gap-5 bg-slate-950 p-5 text-slate-100">
+    <div className="flex min-h-[calc(100vh-80px)] flex-col gap-5 bg-[#090c12] p-5 text-slate-100">
       {/* ── Top Header & Live SSE Status ────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900/90 px-6 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-800 bg-[#0f141e] px-6 py-4">
         <div>
-          <div className="flex items-center gap-2.5">
-            <span className="rounded bg-blue-500/20 px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-blue-400">
-              PydanticAI Multi-Agent Orchestration
-            </span>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-xl font-bold tracking-tight text-white">
+              AI Operations Center &amp; Supervisor Command Console
+            </h1>
             <span
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
+              className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-0.5 font-mono text-[11px] font-medium ${
                 sseConnected
-                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
-                  : "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                  ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-300"
+                  : "border-amber-500/35 bg-amber-500/10 text-amber-300"
               }`}
             >
               <span
-                className={`h-2 w-2 rounded-full ${
+                className={`h-1.5 w-1.5 rounded-full ${
                   sseConnected ? "bg-emerald-400 animate-pulse" : "bg-amber-400"
                 }`}
               />
               {sseConnected ? "SSE Live Stream Active" : "Reconnecting Stream…"}
             </span>
           </div>
-          <h1 className="mt-1 text-xl font-bold text-white">
-            AI Operations Center & Supervisor Command Console
-          </h1>
-          <p className="text-xs text-slate-400">
+          <p className="mt-1 text-xs text-slate-400">
             Real-time multi-agent delegation, deterministic policy gates, token telemetry, and human-in-the-loop approvals.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 text-xs">
-          <div className="rounded-xl border border-slate-800 bg-slate-950 px-3.5 py-2">
-            <div className="text-[10px] uppercase text-slate-500">Total Executions</div>
-            <div className="font-mono text-base font-bold text-white">
+        <div className="grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-slate-800 bg-slate-800 text-xs">
+          <div className="bg-[#090c12] px-3.5 py-2">
+            <div className="font-mono text-[10px] uppercase text-slate-400">Total Executions</div>
+            <div className="mt-0.5 font-mono text-base font-bold tabular-nums text-white">
               {snapshot.executions.length + snapshot.verification_runs.length}
             </div>
           </div>
-          <div className="rounded-xl border border-slate-800 bg-slate-950 px-3.5 py-2">
-            <div className="text-[10px] uppercase text-slate-500">Pending Approvals</div>
-            <div className="font-mono text-base font-bold text-amber-400">
+          <div className="bg-[#090c12] px-3.5 py-2">
+            <div className="font-mono text-[10px] uppercase text-slate-400">Pending Approvals</div>
+            <div className="mt-0.5 font-mono text-base font-bold tabular-nums text-amber-400">
               {pendingExecApprovals.length +
                 pendingSchedProposals.length +
                 snapshot.pending_payment_approvals.length}
             </div>
           </div>
-          <div className="rounded-xl border border-slate-800 bg-slate-950 px-3.5 py-2">
-            <div className="text-[10px] uppercase text-slate-500">Total Tokens</div>
-            <div className="font-mono text-base font-bold text-blue-400">
+          <div className="bg-[#090c12] px-3.5 py-2">
+            <div className="font-mono text-[10px] uppercase text-slate-400">Total Tokens</div>
+            <div className="mt-0.5 font-mono text-base font-bold tabular-nums text-blue-400">
               {totalTokensAllRuns.toLocaleString()}
             </div>
           </div>
@@ -544,7 +548,8 @@ export default function AiOperationsCenterClient({
             <button
               key={preset.label}
               type="button"
-              disabled={isRunningWorkflow}
+              disabled={isRunningWorkflow || !selectedProjectId}
+              title={!selectedProjectId ? "Select a project first — runs are project-scoped." : undefined}
               onClick={() => void handleRunSupervisor(preset.prompt, preset.opType)}
               className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:border-blue-500/50 hover:bg-blue-500/10 hover:text-blue-300 disabled:opacity-50"
             >
@@ -567,7 +572,8 @@ export default function AiOperationsCenterClient({
           />
           <button
             type="button"
-            disabled={isRunningWorkflow || !commandInput.trim()}
+            disabled={isRunningWorkflow || !commandInput.trim() || !selectedProjectId}
+            title={!selectedProjectId ? "Select a project first — runs are project-scoped." : undefined}
             onClick={() => void handleRunSupervisor()}
             className="rounded-xl bg-blue-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
           >

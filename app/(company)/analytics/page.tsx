@@ -13,24 +13,56 @@
 export const dynamic = "force-dynamic";
 
 import { db } from "@/lib/db";
-import { milestones, payments, candidates } from "@/lib/db/schema";
+import { milestones, payments, candidates, projects } from "@/lib/db/schema";
+import { eq, inArray } from "drizzle-orm";
 
 import { buildStudioData, type InvoiceRow, type CustomerRow } from "@/components/ag-studio-dashboard/data";
 import AgStudioDashboard from "@/components/ag-studio-dashboard/Dashboard";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { requirePageRole, scopedCompanyId } from "@/lib/auth/guards";
 
 export default async function AnalyticsPage() {
+  // Authenticate + authorize BEFORE querying/rendering (demo bypass: fixtures only).
+  const auth = await requirePageRole(["company", "admin"]);
+  const scope = scopedCompanyId(auth);
   const demoTables = isDemoMode() ? getDemoTables() : null;
+  // Live company scope: restrict every table to the caller's own projects.
+  const ownProjectIds =
+    !demoTables && scope
+      ? (
+          await db
+            .select({ id: projects.id })
+            .from(projects)
+            .where(eq(projects.companyId, scope))
+        ).map((r) => r.id)
+      : null;
   // ── 1. Fetch invoice rows (milestones LEFT JOIN payments) ─────────────────
   const milestoneRows = demoTables
     ? demoTables.milestones.slice(0, 500)
-    : await db.select().from(milestones).limit(500);
+    : ownProjectIds
+      ? ownProjectIds.length > 0
+        ? await db
+            .select()
+            .from(milestones)
+            .where(inArray(milestones.projectId, ownProjectIds))
+            .limit(500)
+        : []
+      : await db.select().from(milestones).limit(500);
 
   // Build a lookup of candidate_id per milestone via the payments table
+  const scopedMilestoneIds = ownProjectIds ? milestoneRows.map((m) => m.id) : null;
   const paymentRows = demoTables
     ? demoTables.payments.slice(0, 500)
-    : await db.select().from(payments).limit(500);
+    : scopedMilestoneIds
+      ? scopedMilestoneIds.length > 0
+        ? await db
+            .select()
+            .from(payments)
+            .where(inArray(payments.milestoneId, scopedMilestoneIds))
+            .limit(500)
+        : []
+      : await db.select().from(payments).limit(500);
   const paymentByMilestone = new Map(
     paymentRows.map((p) => [p.milestoneId, p])
   );
@@ -57,7 +89,15 @@ export default async function AnalyticsPage() {
   // ── 2. Fetch customer rows (candidates) ───────────────────────────────────
   const candidateRows = demoTables
     ? demoTables.candidates.slice(0, 500)
-    : await db.select().from(candidates).limit(500);
+    : ownProjectIds
+      ? ownProjectIds.length > 0
+        ? await db
+            .select()
+            .from(candidates)
+            .where(inArray(candidates.projectId, ownProjectIds))
+            .limit(500)
+        : []
+      : await db.select().from(candidates).limit(500);
 
   const customerRows: CustomerRow[] = candidateRows.map((c) => ({
     id:         c.id,

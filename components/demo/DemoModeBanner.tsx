@@ -14,8 +14,9 @@ export function DemoModeBanner() {
       <div
         role="status"
         aria-label="Live mode"
-        className="w-full border-b border-emerald-200 bg-emerald-50 px-4 py-1 text-center text-xs font-medium text-emerald-800"
+        className="w-full border-b border-emerald-500/20 bg-emerald-950/40 px-4 py-1 text-center text-[11px] font-medium tracking-wide text-emerald-300"
       >
+        <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 align-middle" />
         LIVE MODE — connected to real services (PayPal Sandbox for payments)
       </div>
     );
@@ -25,8 +26,9 @@ export function DemoModeBanner() {
     <div
       role="banner"
       aria-label="Offline demo mode"
-      className="w-full border-b border-sky-200 bg-sky-100 px-4 py-1.5 text-center text-xs font-semibold text-sky-900"
+      className="w-full border-b border-sky-500/20 bg-sky-950/45 px-4 py-1 text-center text-[11px] font-medium tracking-wide text-sky-200"
     >
+      <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-sky-400 align-middle" />
       DEMO MODE — offline fictional scenario (TechNova Solutions). All data,
       transactions, and agent runs on this page are simulated.
     </div>

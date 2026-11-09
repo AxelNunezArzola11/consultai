@@ -69,7 +69,7 @@ const CANDIDATE_TRANSITIONS: Record<CandidateStatus, ReadonlySet<CandidateStatus
   scheduled:       cs("meeting_held", "no_show", "cancelled"),
 
   // Phase 4 pipeline
-  found:           cs("shortlisted", "rejected"),
+  found:           cs("shortlisted", "nda_sent", "rejected"),
   shortlisted:     cs("nda_sent", "rejected"),
   nda_sent:        cs("nda_signed", "declined", "expired"),
   nda_signed:      cs("booking_unlocked"),

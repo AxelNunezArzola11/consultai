@@ -19,32 +19,59 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { and, eq, ilike } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "@/lib/db";
 import { candidates, projects } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { isDemoMode } from "@/lib/demo/config";
+import {
+  normalizeGithubHandle,
+  isValidGithubHandle,
+} from "@/lib/vetting/github-handle";
 
 export const dynamic = "force-dynamic";
 
 const BodySchema = z.object({
-  projectId:    z.string().min(1).max(100),
+  projectId: z.string().min(1).max(100),
   githubHandle: z
     .string()
     .min(1)
-    .max(39)
-    .regex(/^[a-zA-Z0-9]([a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/, "Invalid GitHub handle"),
-  name:  z.string().min(1).max(200).optional(),
+    .max(200)
+    .transform((val) => normalizeGithubHandle(val))
+    .refine((val) => isValidGithubHandle(val), {
+      message: "Invalid GitHub handle or URL",
+    }),
+  name: z.string().min(1).max(200).optional(),
   email: z.string().email().optional(),
 });
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // Auth
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
-  if (role !== "company") {
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+  if (role !== "company" && role !== "admin") {
     return NextResponse.json({ error: "Forbidden: company role required" }, { status: 403 });
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+  }
+
+  const ip = getIp(req);
+  const { ok, retryAfterSec } = checkRateLimit("candidate-create", ip, 30, 60);
+  if (!ok) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
   }
 
   let body: unknown;
@@ -69,13 +96,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!project) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
-    const existing = t.candidates.find((c) => c.githubHandle === githubHandle);
+    if (session?.role === "company" && session.companyId &&
+        project.companyId !== session.companyId) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    const existing = t.candidates.find(
+      (c) =>
+        c.projectId === projectId &&
+        (c.githubHandle ?? "").toLowerCase() === githubHandle.toLowerCase()
+    );
     if (existing) {
-      return NextResponse.json({ id: existing.id, alreadyExists: true, simulated: true });
+      return NextResponse.json({
+        id: existing.id,
+        candidate: {
+          id: existing.id,
+          name: existing.name,
+          email: existing.email,
+          githubHandle: existing.githubHandle,
+          status: existing.status,
+          rank: existing.rank,
+          trustScore: existing.trustScore ? Number(existing.trustScore) : null,
+        },
+        alreadyExists: true,
+        simulated: true,
+      });
     }
     const id = `demo-cand-${nanoid(8)}`;
     const now = new Date();
-    t.candidates.push({
+    const newRow = {
       id,
       projectId,
       name: name ?? `@${githubHandle}`,
@@ -87,19 +135,43 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       cannotDo: null,
       vettingSummary: null,
       rank: t.candidates.filter((c) => c.projectId === projectId).length + 1,
-      status: "pending",
+      status: "pending" as const,
       rejectionReason: null,
       vettingConsentAt: now,
       vettingRanAt: null,
       createdAt: now,
       updatedAt: now,
-    });
-    return NextResponse.json({ id, alreadyExists: false, simulated: true }, { status: 201 });
+    };
+    t.candidates.push(newRow);
+    try {
+      revalidatePath(`/project/${projectId}/vetting`);
+      revalidatePath(`/project/${projectId}/candidates`);
+      revalidatePath("/operations");
+    } catch {
+      // revalidatePath may no-op in unit tests outside Next request context
+    }
+    return NextResponse.json(
+      {
+        id,
+        candidate: {
+          id: newRow.id,
+          name: newRow.name,
+          email: newRow.email,
+          githubHandle: newRow.githubHandle,
+          status: newRow.status,
+          rank: newRow.rank,
+          trustScore: null,
+        },
+        alreadyExists: false,
+        simulated: true,
+      },
+      { status: 201 }
+    );
   }
 
   // Verify project exists
   const [project] = await db
-    .select({ id: projects.id })
+    .select({ id: projects.id, companyId: projects.companyId })
     .from(projects)
     .where(eq(projects.id, projectId))
     .limit(1);
@@ -107,17 +179,38 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
+  if (session?.role === "company" && session.companyId &&
+      project.companyId !== session.companyId) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
-  // Check for duplicate github handle in this project
+  // Check for duplicate github handle in THIS project (case-insensitive)
   const [existing] = await db
-    .select({ id: candidates.id })
+    .select()
     .from(candidates)
-    .where(eq(candidates.githubHandle, githubHandle))
+    .where(
+      and(
+        eq(candidates.projectId, projectId),
+        ilike(candidates.githubHandle, githubHandle)
+      )
+    )
     .limit(1);
 
   if (existing) {
-    // Return the existing id so the client can proceed to vetting without a duplicate
-    return NextResponse.json({ id: existing.id, alreadyExists: true });
+    // Return the existing candidate so the client can proceed to vetting without a duplicate
+    return NextResponse.json({
+      id: existing.id,
+      candidate: {
+        id: existing.id,
+        name: existing.name,
+        email: existing.email,
+        githubHandle: existing.githubHandle,
+        status: existing.status,
+        rank: existing.rank,
+        trustScore: existing.trustScore ? Number(existing.trustScore) : null,
+      },
+      alreadyExists: true,
+    });
   }
 
   const id = nanoid();
@@ -131,13 +224,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     email:        displayEmail,
     githubHandle,
     status:       "pending",
-    // Record consent at creation time — the company is adding this candidate
-    // and consenting on their behalf for the purpose of portfolio analysis.
-    // This mirrors the existing "Record Consent + Run Vetting" button flow.
     vettingConsentAt: new Date(),
     createdAt: new Date(),
     updatedAt: new Date(),
   });
 
-  return NextResponse.json({ id, alreadyExists: false }, { status: 201 });
+  try {
+    revalidatePath(`/project/${projectId}/vetting`);
+    revalidatePath(`/project/${projectId}/candidates`);
+    revalidatePath("/operations");
+  } catch {
+    // revalidatePath may no-op in unit tests outside Next request context
+  }
+
+  return NextResponse.json(
+    {
+      id,
+      candidate: {
+        id,
+        name: displayName,
+        email: displayEmail,
+        githubHandle,
+        status: "pending",
+        rank: null,
+        trustScore: null,
+      },
+      alreadyExists: false,
+    },
+    { status: 201 }
+  );
 }

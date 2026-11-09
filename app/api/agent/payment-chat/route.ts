@@ -23,6 +23,8 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { projects, milestones } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import {
   paymentChatTools,
   buildPaymentChatSystemPrompt,
@@ -106,10 +108,27 @@ export async function POST(req: NextRequest) {
 }
 
 async function paymentChatHandler(req: NextRequest) {
-  // Auth — company only
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
-  if (role !== "company") {
+  // Auth — company or admin
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+  if (role !== "company" && role !== "admin") {
     return Response.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return Response.json({ error: "missing_company_context" }, { status: 403 });
+  }
+
+  const ip = getIp(req);
+  const { ok, retryAfterSec } = checkRateLimit("payment-chat", ip, 20, 60);
+  if (!ok) {
+    return Response.json(
+      { error: "Rate limit exceeded" },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
   }
 
   let body: { messages?: unknown[]; projectId?: string };
@@ -124,6 +143,9 @@ async function paymentChatHandler(req: NextRequest) {
   if (!projectId || typeof projectId !== "string" || projectId.length > 100) {
     return Response.json({ error: "projectId required" }, { status: 400 });
   }
+  if (Array.isArray(messages) && messages.length > 100) {
+    return Response.json({ error: "messages array too large" }, { status: 400 });
+  }
 
   // Validate project exists + load milestones in parallel.
   // We fetch milestones here (not only via tool) so the system prompt contains
@@ -131,7 +153,7 @@ async function paymentChatHandler(req: NextRequest) {
   // because it hasn't called listMilestones yet and the system prompt is empty.
   const [projectRows, milestoneRows] = await Promise.all([
     db
-      .select({ id: projects.id, title: projects.title })
+      .select({ id: projects.id, title: projects.title, companyId: projects.companyId })
       .from(projects)
       .where(eq(projects.id, projectId))
       .limit(1),
@@ -151,6 +173,13 @@ async function paymentChatHandler(req: NextRequest) {
 
   if (projectRows.length === 0) {
     return Response.json({ error: "Project not found" }, { status: 404 });
+  }
+  if (
+    session?.role === "company" &&
+    session.companyId &&
+    projectRows[0].companyId !== session.companyId
+  ) {
+    return Response.json({ error: "forbidden" }, { status: 403 });
   }
 
   const safeMessages = Array.isArray(messages) ? messages : [];

@@ -91,6 +91,19 @@ export interface NdaGenerateResult {
   documentHash: string;
 }
 
+/**
+ * Sanitize Unicode characters outside WinAnsi (ASCII + Latin-1) so pdf-lib's
+ * StandardFonts.Helvetica does not throw "WinAnsi cannot encode ...".
+ */
+function toWinAnsiSafe(input: string): string {
+  return input
+    .replace(/⚠️|⚠/g, "[!]")
+    .replace(/[—–]/g, "--")
+    .replace(/[""]/g, '"')
+    .replace(/['']/g, "'")
+    .replace(/[^\x20-\x7E\xA0-\xFF]/g, "");
+}
+
 export async function generateNdaPdf(params: {
   projectTitle: string;
   companyName: string;
@@ -127,7 +140,7 @@ export async function generateNdaPdf(params: {
     color: rgb(0, 0, 0),
   });
 
-  page.drawText("(DEMONSTRATION ONLY — NOT LEGALLY VALIDATED)", {
+  page.drawText(toWinAnsiSafe("(DEMONSTRATION ONLY — NOT LEGALLY VALIDATED)"), {
     x: 50,
     y: height - 85,
     size: 10,
@@ -158,7 +171,7 @@ export async function generateNdaPdf(params: {
       y = 842 - 60;
     }
 
-    const line = rawLine.trim();
+    const line = toWinAnsiSafe(rawLine.trim());
     if (!line) {
       y -= lineHeight;
       continue;

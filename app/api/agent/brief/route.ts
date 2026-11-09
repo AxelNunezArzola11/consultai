@@ -10,6 +10,8 @@
  *     projectId: string          — project to save plan to
  *     agentSessionId: string     — ephemeral session key for rate limiting + draft saving
  *     rawBrief?: string          — initial brief text (first call only)
+ *     projectTitle?: string      — creation title; demo only, lets a cold
+ *                                  serverless instance rehydrate the draft
  *   }
  *
  * Rate limit: BRIEF_LIMITS.SESSION_RATE_LIMIT per session per hour.
@@ -34,6 +36,9 @@ import {
   wrapUserBrief,
 } from "@/lib/brief/tools";
 import { BRIEF_LIMITS } from "@/lib/brief/schema";
+import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { getSessionFromCookie } from "@/lib/auth/session";
+import { creatorScopedKey } from "@/lib/brief/creator-scope";
 import { NextRequest } from "next/server";
 
 export const runtime = "nodejs";
@@ -113,11 +118,25 @@ export async function POST(req: NextRequest) {
 }
 
 async function briefAgentHandler(req: NextRequest) {
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+  if (role !== "company" && role !== "admin") {
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  }
+  // Live mode: brief sessions consume LLM quota and touch project data, so a
+  // verified session is required — session-less role holders are rejected.
+  // Demo mode keeps the simulated stream for the role-switcher walkthrough.
+  if (!isDemoMode() && !session) {
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  }
+
   let body: {
     messages?: unknown[];
     projectId?: string;
     agentSessionId?: string;
     rawBrief?: string;
+    projectTitle?: string;
   };
 
   try {
@@ -126,7 +145,11 @@ async function briefAgentHandler(req: NextRequest) {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { messages, projectId, agentSessionId, rawBrief } = body;
+  const { messages, projectId, agentSessionId, rawBrief, projectTitle } = body;
+
+  if (Array.isArray(messages) && messages.length > 100) {
+    return Response.json({ error: "messages array too large" }, { status: 400 });
+  }
 
   // --- Input validation ---
 
@@ -157,9 +180,29 @@ async function briefAgentHandler(req: NextRequest) {
   if (isDemoMode()) {
     const { getDemoTables } = await import("@/lib/demo/store");
     const { buildSimulatedBriefText } = await import("@/lib/demo/simulated-brief");
-    const project = getDemoTables().projects.find((p) => p.id === projectId);
+    const {
+      demoCompanyForSession,
+      resolveDemoDraftForPlanning,
+    } = await import("@/lib/demo/drafts");
+    const found = getDemoTables().projects.find((p) => p.id === projectId);
+    // Serverless-safe: a cold instance rehydrates the POST-accepted draft
+    // from the creation title; bare IDs still 404 honestly.
+    const project =
+      found ??
+      resolveDemoDraftForPlanning({
+        projectId,
+        title: projectTitle,
+        companyId: demoCompanyForSession(session?.companyId),
+      });
     if (!project) {
       return Response.json({ error: "Project not found" }, { status: 404 });
+    }
+    if (
+      session?.role === "company" &&
+      session.companyId &&
+      project.companyId !== session.companyId
+    ) {
+      return Response.json({ error: "forbidden" }, { status: 403 });
     }
     const text = buildSimulatedBriefText(project.title);
     const stream = createUIMessageStream({
@@ -180,19 +223,36 @@ async function briefAgentHandler(req: NextRequest) {
     return createUIMessageStreamResponse({ stream });
   }
 
+  // Live-only from here: the gate above guarantees a verified session.
+  const liveSession = session;
+  if (!liveSession) {
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  }
+
+  // Rate quota is bound to the authenticated creator (not the raw
+  // client-supplied id), so rotating ids cannot evade the per-user quota.
+  const rateKey = creatorScopedKey(liveSession.userId, agentSessionId);
+
   // Validate project exists + rate limit check — run in parallel to save ~200-400ms
   // of sequential Neon HTTP round-trips before streaming starts.
   const [projectRows, rateResult] = await Promise.all([
     db
-      .select({ id: projects.id })
+      .select({ id: projects.id, companyId: projects.companyId })
       .from(projects)
       .where(eq(projects.id, projectId))
       .limit(1),
-    checkBriefRateLimit(agentSessionId),
+    checkBriefRateLimit(rateKey),
   ]);
 
   if (projectRows.length === 0) {
     return Response.json({ error: "Project not found" }, { status: 404 });
+  }
+  // Company callers are always ownership-checked (no session-company bypass).
+  if (
+    liveSession.role === "company" &&
+    projectRows[0].companyId !== liveSession.companyId
+  ) {
+    return Response.json({ error: "forbidden" }, { status: 403 });
   }
 
   if (!rateResult.allowed) {

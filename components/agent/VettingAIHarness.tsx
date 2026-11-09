@@ -236,12 +236,13 @@ export function VettingAIHarness({
   const { messages, sendMessage, status } = useChat({
     transport,
     onError: (err) => {
-      // Log at warn (not error) so the browser console stays clean.
-      // The route is designed to never return an error chunk, but if something
-      // slips through (e.g. a transient network blip), show a soft inline banner.
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.warn("[VettingAIHarness] soft error (non-fatal):", msg);
-      setErrorMsg("AI assistant encountered an issue. Try again or check the console.");
+      setErrorMsg(
+        msg.includes("503") || msg.includes("unconfigured")
+          ? "Live AI provider is not configured. Check GROQ_API_KEY or enable DEMO_MODE."
+          : `AI assistant error: ${msg}`
+      );
     },
   });
 
@@ -299,7 +300,7 @@ export function VettingAIHarness({
   return (
     <div
       className={[
-        "fixed bottom-6 right-6 z-50 flex flex-col transition-all duration-300 ease-in-out",
+        "fixed bottom-4 right-4 z-50 flex flex-col transition-all duration-200",
         isOpen ? "w-80 sm:w-96" : "w-auto",
       ].join(" ")}
       style={{ maxHeight: isOpen ? "min(520px, calc(100vh - 80px))" : "auto" }}
@@ -409,17 +410,30 @@ export function VettingAIHarness({
                       isUser ? "items-end" : "items-start"
                     }`}
                   >
-                    {textContent && (
-                      <div
-                        className={`rounded-xl px-3 py-2 text-xs leading-relaxed ${
-                          isUser
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-muted/50 text-foreground"
-                        }`}
-                      >
-                        {textContent}
-                      </div>
-                    )}
+                    {textContent && (() => {
+                      const isSimulated =
+                        textContent.startsWith("[DEMO MODE — Simulated Response]") ||
+                        textContent.startsWith("SIMULATED RESPONSE");
+                      const cleanedText = textContent
+                        .replace(/^\[DEMO MODE — Simulated Response\]\s*/, "")
+                        .replace(/^SIMULATED RESPONSE — no live AI ran for this message\.\s*/, "");
+                      return (
+                        <div
+                          className={`rounded-xl px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap ${
+                            isUser
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-muted/50 text-foreground"
+                          }`}
+                        >
+                          {!isUser && isSimulated && (
+                            <div className="mb-1.5 inline-flex items-center gap-1 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-mono text-amber-300">
+                              <span>DEMO MODE · Simulated Response</span>
+                            </div>
+                          )}
+                          <div>{cleanedText}</div>
+                        </div>
+                      );
+                    })()}
                     {toolResults.map((tr, i) => (
                       <ToolResultBadge
                         key={i}

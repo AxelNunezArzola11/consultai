@@ -31,6 +31,12 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       NODE_ENV: "production",
+      // Explicitly establish the documented preconditions: `next start`
+      // loads .env.local, which would otherwise leak DEMO_MODE=true and a
+      // real DATABASE_URL into this "live without credentials" check.
+      // Explicit process env wins over .env files.
+      DEMO_MODE: "false",
+      DATABASE_URL: "",
       ROLE_COOKIE_SECRET:
         "live-honesty-secret-0123456789abcdef-live-honesty",
       NODE_OPTIONS: "--require /tmp/net-shim.js",

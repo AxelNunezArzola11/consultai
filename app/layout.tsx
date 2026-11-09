@@ -22,7 +22,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ConsultAI",
+  title: "ConsultAI — Enterprise Consulting & Escrow OS",
   description: "AI-agent platform for vetted freelance consultants — PayPal Business Solutions",
 };
 
@@ -33,7 +33,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
       suppressHydrationWarning
     >
-      <body className="min-h-full flex flex-col bg-[#181d1f] text-slate-100">
+      <head>
+        <meta name="color-scheme" content="dark light" />
+      </head>
+      <body className="min-h-full flex flex-col bg-[#090c12] text-slate-100 font-sans selection:bg-blue-500/30 selection:text-white">
         <ThemeProvider
           attribute="class"
           defaultTheme="dark"
@@ -41,8 +44,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           forcedTheme="dark"
           disableTransitionOnChange
         >
-          <DemoModeBanner />
-          <SandboxBadge />
+          <div className="flex flex-col border-b border-slate-800/80 bg-[#0b101b]">
+            <DemoModeBanner />
+            <SandboxBadge />
+          </div>
           {children}
           <Toaster />
         </ThemeProvider>

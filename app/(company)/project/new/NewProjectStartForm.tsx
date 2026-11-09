@@ -6,6 +6,9 @@
  * Collects the project title and brief, then creates ONE draft row via
  * POST /api/projects on explicit submit. The project ID is generated once per
  * form instance, so retries and double-clicks cannot create duplicates.
+ * Navigation uses the server-returned canonical project ID and carries the
+ * creation title so demo mode can rehydrate the draft on any serverless
+ * instance (see resolveDemoDraftForPlanning).
  */
 
 import { useState } from "react";
@@ -48,7 +51,19 @@ export function NewProjectStartForm() {
         setSubmitting(false);
         return;
       }
-      const params = new URLSearchParams({ projectId });
+      // Navigate with the server-canonical persisted ID — never assume the
+      // request echo. A missing ID means persistence did not confirm.
+      const canonicalId =
+        typeof data.projectId === "string" ? data.projectId.trim() : "";
+      if (!canonicalId) {
+        setError("Could not create the project (missing project ID).");
+        setSubmitting(false);
+        return;
+      }
+      const params = new URLSearchParams({
+        projectId: canonicalId,
+        title: title.trim() || "New project",
+      });
       if (brief.trim()) params.set("brief", brief.trim());
       router.push(`/project/new?${params.toString()}`);
     } catch {

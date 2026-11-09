@@ -1,15 +1,19 @@
 /**
  * POST /api/auth/set-role
  *
- * Sets the signed, httpOnly role cookie.
- * Body: { role: "company" | "freelancer" }
+ * Sets the signed, httpOnly role cookie (`consultai_role_v1`).
+ * Body: { role: "company" | "freelancer" | "admin" }
  *
- * DEMO AUTH — not production auth.
- * See lib/auth/role-cookie.ts for details.
+ * SECURITY RULE (Section 3.1 / 3.7):
+ * Unauthenticated role-switching via `/api/auth/set-role` is restricted to
+ * DEMO mode (`DEMO_MODE=true`) or automated development/test environments.
+ * In production LIVE mode (`NODE_ENV === "production"` and `DEMO_MODE !== "true"`),
+ * users must authenticate via `/api/auth/login` or `/api/auth/register`.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { signRoleCookie, type Role } from "@/lib/auth/role-cookie";
+import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +21,18 @@ const VALID_ROLES: Role[] = ["company", "freelancer", "admin"];
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
+    // Block unauthenticated role-switching in production LIVE mode
+    if (process.env.NODE_ENV === "production" && !isDemoMode()) {
+      return NextResponse.json(
+        {
+          error: "demo_role_switch_disabled",
+          message:
+            "Role switching is only available in DEMO mode. Please sign in at /login.",
+        },
+        { status: 403 }
+      );
+    }
+
     const body = await req.json().catch(() => null);
     const role = body?.role as string | undefined;
 

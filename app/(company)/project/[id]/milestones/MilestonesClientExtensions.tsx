@@ -13,6 +13,7 @@
  */
 
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 import type { GanttMilestone } from "@/components/canvas/GanttPanel";
 
@@ -67,24 +68,29 @@ interface Props {
 // ── Component ──────────────────────────────────────────────────────────────
 
 export function MilestonesClientExtensions({ projectId, milestones, ganttMilestones = [] }: Props) {
-  // Track version updates from successful reschedules so subsequent drops use
-  // the correct expectedVersion without a full page refresh.
+  const router = useRouter();
   const [versionMap, setVersionMap] = useState<Record<string, number>>({});
+  const [dateMap, setDateMap] = useState<Record<string, string>>({});
+  const [showAssistant, setShowAssistant] = useState(false);
 
   const hydratedGanttMilestones: GanttMilestone[] = ganttMilestones.map((m) => ({
     ...m,
     version: versionMap[m.id] ?? m.version,
+    startDate: dateMap[m.id] ?? m.startDate,
   }));
 
   const handleReschedule = useCallback(
-    (milestoneId: string, _newStartDate: string, newVersion: number) => {
+    (milestoneId: string, newStartDate: string, newVersion: number) => {
       setVersionMap((prev) => ({ ...prev, [milestoneId]: newVersion }));
+      setDateMap((prev) => ({ ...prev, [milestoneId]: newStartDate }));
+      // Revalidate server data (lists, budgets) so the page reconciles.
+      router.refresh();
     },
-    []
+    [router]
   );
 
   return (
-    <>
+    <div className="space-y-4">
       {/* Gantt chart — shown only when NEXT_PUBLIC_GANTT_ENABLED=true */}
       {ganttMilestones.length > 0 && (
         <GanttPanelLazy
@@ -97,15 +103,40 @@ export function MilestonesClientExtensions({ projectId, milestones, ganttMilesto
       {/* Candidate compliance overview */}
       <CandidateComplianceBar projectId={projectId} />
 
-      {/* Review meetings scheduler */}
-      <div className="rounded-xl border bg-muted/30 p-4">
-        <MeetingScheduler projectId={projectId} />
+      {/* Compact Tools Bar: Review Meetings + Toggleable Payment Assistant */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+        <div className="rounded-xl border border-slate-800 bg-[#0f141e] p-4 lg:col-span-7">
+          <MeetingScheduler projectId={projectId} />
+        </div>
+
+        <div className="flex flex-col justify-between rounded-xl border border-slate-800 bg-[#0f141e] p-4 lg:col-span-5">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-blue-400" />
+                <h3 className="text-sm font-semibold text-white">AI Payment &amp; Escrow Assistant</h3>
+              </div>
+              <p className="mt-1 text-xs text-slate-300">
+                Inspect milestone statuses, request payout readiness checks, or query escrow audit trails.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAssistant((v) => !v)}
+              className="shrink-0 rounded-lg border border-blue-500/35 bg-blue-500/15 px-3 py-1.5 text-xs font-semibold text-blue-300 transition hover:bg-blue-500/25"
+            >
+              {showAssistant ? "Hide Assistant" : "Open Assistant"}
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Payment Chat — AI-driven payment assistant */}
-      <div className="rounded-xl border overflow-hidden" style={{ minHeight: "360px" }}>
-        <PaymentChatPanel projectId={projectId} milestones={milestones} />
-      </div>
-    </>
+      {/* Expandable Payment Chat — AI-driven payment assistant */}
+      {showAssistant && (
+        <div className="rounded-xl border border-slate-800 bg-[#0f141e] overflow-hidden" style={{ minHeight: "340px" }}>
+          <PaymentChatPanel projectId={projectId} milestones={milestones} />
+        </div>
+      )}
+    </div>
   );
 }

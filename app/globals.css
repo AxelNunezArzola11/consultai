@@ -7,9 +7,9 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-geist-mono);
-  --font-heading: var(--font-sans);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-heading: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -39,110 +39,181 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
+  --radius-sm: calc(var(--radius) * 0.65);
+  --radius-md: calc(var(--radius) * 0.85);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+  --radius-xl: calc(var(--radius) * 1.25);
+  --radius-2xl: calc(var(--radius) * 1.5);
+  --radius-3xl: calc(var(--radius) * 1.85);
+  --radius-4xl: calc(var(--radius) * 2.2);
 }
 
-/* ── AG Studio Midnight palette (Tech SaaS dark theme) ───────────────────── */
+/* ── ConsultAI Precision Enterprise Design System ────────────────────────── */
 :root {
-  --background: oklch(0.98 0 0);
-  --foreground: oklch(0.15 0.01 255);
+  color-scheme: light dark;
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --background: oklch(0.985 0.002 250);
+  --foreground: oklch(0.145 0.014 252);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.15 0.01 255);
+  --card-foreground: oklch(0.145 0.014 252);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.15 0.01 255);
-  --primary: oklch(0.52 0.19 253);   /* #2196F3 AG accent blue */
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.93 0.01 255);
-  --secondary-foreground: oklch(0.25 0.01 255);
-  --muted: oklch(0.93 0.005 255);
-  --muted-foreground: oklch(0.52 0.02 255);
-  --accent: oklch(0.93 0.01 255);
-  --accent-foreground: oklch(0.25 0.01 255);
+  --popover-foreground: oklch(0.145 0.014 252);
+  --primary: oklch(0.54 0.19 253);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.945 0.008 252);
+  --secondary-foreground: oklch(0.22 0.014 252);
+  --muted: oklch(0.945 0.006 252);
+  --muted-foreground: oklch(0.46 0.018 252);
+  --accent: oklch(0.945 0.008 252);
+  --accent-foreground: oklch(0.22 0.014 252);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.88 0.005 255);
-  --input: oklch(0.88 0.005 255);
-  --ring: oklch(0.52 0.19 253);
-  /* Chart colours — AG Studio palette */
-  --chart-1: oklch(0.52 0.19 253);
-  --chart-2: oklch(0.67 0.14 165);
-  --chart-3: oklch(0.72 0.15 85);
-  --chart-4: oklch(0.60 0.18 310);
-  --chart-5: oklch(0.65 0.20 25);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.97 0.005 255);
-  --sidebar-foreground: oklch(0.15 0.01 255);
-  --sidebar-primary: oklch(0.52 0.19 253);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.93 0.01 255);
-  --sidebar-accent-foreground: oklch(0.25 0.01 255);
-  --sidebar-border: oklch(0.88 0.005 255);
-  --sidebar-ring: oklch(0.52 0.19 253);
-  /* ONE accent — AG Studio blue. Contrast verified:
-     Light: accent-as-text on white bg = WCAG AA ✓
-            white text on accent bg = WCAG AA ✓
-     Dark:  accent-as-text on dark bg = WCAG AA ✓ */
-  --accent-brand: oklch(0.52 0.19 253);
-  --accent-brand-foreground: oklch(0.985 0 0);
+  --border: oklch(0.89 0.008 252);
+  --input: oklch(0.89 0.008 252);
+  --ring: oklch(0.54 0.19 253);
+
+  --chart-1: oklch(0.54 0.19 253);
+  --chart-2: oklch(0.67 0.15 162);
+  --chart-3: oklch(0.74 0.15 82);
+  --chart-4: oklch(0.64 0.16 215);
+  --chart-5: oklch(0.64 0.20 25);
+
+  --radius: 0.5rem;
+  --sidebar: oklch(0.975 0.004 252);
+  --sidebar-foreground: oklch(0.145 0.014 252);
+  --sidebar-primary: oklch(0.54 0.19 253);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.945 0.008 252);
+  --sidebar-accent-foreground: oklch(0.22 0.014 252);
+  --sidebar-border: oklch(0.89 0.008 252);
+  --sidebar-ring: oklch(0.54 0.19 253);
+
+  --accent-brand: oklch(0.54 0.19 253);
+  --accent-brand-foreground: oklch(0.99 0 0);
+
+  --scrollbar-track: #f1f5f9;
+  --scrollbar-thumb: #94a3b8;
+  accent-color: #2563eb;
 }
 
-/* ── AG Studio Midnight dark palette ──────────────────────────────────────── */
+/* ── Dark Mode — Precision Carbon & Slate Hierarchy ──────────────────────── */
 .dark {
-  --background: oklch(0.155 0.012 253);    /* #181d1f */
-  --foreground: oklch(0.94 0.008 255);     /* near-white */
-  --card: oklch(0.195 0.014 253);          /* #282f33 surface */
-  --card-foreground: oklch(0.94 0.008 255);
-  --popover: oklch(0.195 0.014 253);
-  --popover-foreground: oklch(0.94 0.008 255);
-  --primary: oklch(0.62 0.19 253);         /* brighter #2196F3 on dark */
-  --primary-foreground: oklch(0.10 0.01 253);
-  --secondary: oklch(0.235 0.016 253);     /* slightly lighter surface */
-  --secondary-foreground: oklch(0.85 0.01 255);
-  --muted: oklch(0.235 0.016 253);
-  --muted-foreground: oklch(0.60 0.01 255);
-  --accent: oklch(0.235 0.016 253);
-  --accent-foreground: oklch(0.85 0.01 255);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(0.265 0.018 253);        /* #2a3236 border */
-  --input: oklch(0.265 0.018 253);
+  color-scheme: dark;
+  --background: oklch(0.13 0.012 255);        /* #090c12 deep obsidian canvas */
+  --foreground: oklch(0.955 0.006 255);       /* #f1f5f9 crisp primary ink */
+  --card: oklch(0.168 0.014 255);             /* #0f141e elevated surface-1 */
+  --card-foreground: oklch(0.955 0.006 255);
+  --popover: oklch(0.185 0.016 255);          /* #131a27 surface-2 */
+  --popover-foreground: oklch(0.955 0.006 255);
+  --primary: oklch(0.62 0.19 253);            /* #3b82f6 Cobalt enterprise accent */
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.205 0.016 255);        /* #172030 surface-2 interactive */
+  --secondary-foreground: oklch(0.90 0.008 255);
+  --muted: oklch(0.195 0.015 255);
+  --muted-foreground: oklch(0.68 0.014 255);  /* #94a3b8 ≥ 4.5:1 AA contrast */
+  --accent: oklch(0.215 0.018 255);
+  --accent-foreground: oklch(0.94 0.008 255);
+  --destructive: oklch(0.68 0.19 23);
+  --border: oklch(0.245 0.016 255);           /* #1e293b crisp 1px hairline */
+  --input: oklch(0.235 0.016 255);
   --ring: oklch(0.62 0.19 253);
-  /* Chart colours dark */
+
   --chart-1: oklch(0.62 0.19 253);
-  --chart-2: oklch(0.72 0.14 165);
-  --chart-3: oklch(0.78 0.15 85);
-  --chart-4: oklch(0.68 0.18 310);
-  --chart-5: oklch(0.72 0.20 25);
-  --sidebar: oklch(0.195 0.014 253);
-  --sidebar-foreground: oklch(0.94 0.008 255);
+  --chart-2: oklch(0.72 0.15 162);
+  --chart-3: oklch(0.78 0.15 82);
+  --chart-4: oklch(0.70 0.15 215);
+  --chart-5: oklch(0.70 0.20 25);
+
+  --sidebar: oklch(0.15 0.013 255);
+  --sidebar-foreground: oklch(0.955 0.006 255);
   --sidebar-primary: oklch(0.62 0.19 253);
-  --sidebar-primary-foreground: oklch(0.10 0.01 253);
-  --sidebar-accent: oklch(0.235 0.016 253);
-  --sidebar-accent-foreground: oklch(0.85 0.01 255);
-  --sidebar-border: oklch(0.265 0.018 253);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.205 0.016 255);
+  --sidebar-accent-foreground: oklch(0.92 0.008 255);
+  --sidebar-border: oklch(0.245 0.016 255);
   --sidebar-ring: oklch(0.62 0.19 253);
-  /* Dark mode accent — brighter for legibility */
-  --accent-brand: oklch(0.70 0.18 253);
-  --accent-brand-foreground: oklch(0.10 0.01 253);
+
+  --accent-brand: oklch(0.66 0.18 253);
+  --accent-brand-foreground: oklch(0.99 0 0);
+
+  --scrollbar-track: #0b0f17;
+  --scrollbar-thumb: #334155;
+  accent-color: #3b82f6;
 }
 
 @layer base {
+  :root {
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+    scrollbar-width: thin;
+  }
+
   * {
     @apply border-border outline-ring/50;
   }
+
+  html {
+    font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
-  html {
-    @apply font-sans;
+
+  ::selection {
+    background-color: rgba(59, 130, 246, 0.28);
+    color: #f8fafc;
+  }
+
+  /* Tactile button feedback per Emil Kowalski design engineering */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
+    transition:
+      transform 140ms var(--ease-out-strong),
+      background-color 150ms var(--ease-out-strong),
+      border-color 150ms var(--ease-out-strong),
+      color 150ms var(--ease-out-strong),
+      box-shadow 150ms var(--ease-out-strong);
+  }
+
+  button:not(:disabled):active {
+    transform: scale(0.98);
   }
 }
 
-/* Skeleton shimmer animation — no extra package required */
+/* Legacy WebKit scrollbar fallback when scrollbar-color is not supported */
+@supports not (scrollbar-color: auto) {
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+/* Complex multi-column layout containment (modern-web-guidance: interactions-in-complex-layouts) */
+.pipeline-column-contain {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 260px auto 420px;
+}
+
+@supports not (content-visibility: auto) {
+  .pipeline-column-contain {
+    contain: layout style paint;
+  }
+}
+
+/* Skeleton shimmer animation */
 @keyframes shimmer {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
@@ -163,7 +234,6 @@
   .skeleton-shimmer {
     animation: none;
   }
-  /* Suppress all framer-motion and tw-animate transitions for users who prefer reduced motion */
   *,
   *::before,
   *::after {
@@ -174,38 +244,48 @@
   }
 }
 
-/* ── AG Grid overrides — Midnight theme integration ─────────────────────── */
+/* ── AG Grid overrides — Precision Carbon theme integration ─────────────── */
 .ag-theme-alpine-dark,
 .ag-theme-quartz-dark {
-  --ag-background-color: oklch(0.195 0.014 253);
-  --ag-header-background-color: oklch(0.155 0.012 253);
-  --ag-odd-row-background-color: oklch(0.215 0.015 253);
-  --ag-border-color: oklch(0.265 0.018 253);
-  --ag-row-hover-color: oklch(0.245 0.018 253);
-  --ag-selected-row-background-color: oklch(0.28 0.06 253);
-  --ag-header-foreground-color: oklch(0.94 0.008 255);
-  --ag-foreground-color: oklch(0.85 0.01 255);
-  --ag-data-color: oklch(0.85 0.01 255);
-  --ag-accent-color: oklch(0.62 0.19 253);
+  --ag-background-color: #0b0f17;
+  --ag-header-background-color: #0f1522;
+  --ag-odd-row-background-color: #0d121c;
+  --ag-border-color: #1e293b;
+  --ag-row-hover-color: #162032;
+  --ag-selected-row-background-color: rgba(59, 130, 246, 0.16);
+  --ag-header-foreground-color: #cbd5e1;
+  --ag-foreground-color: #e2e8f0;
+  --ag-data-color: #e2e8f0;
+  --ag-accent-color: #3b82f6;
 }
 
 /* ── Bryntum Gantt theme bridge ─────────────────────────────────────────── */
 .b-gantt {
-  --b-primary-color: oklch(0.62 0.19 253);
-  font-family: inherit;
+  --b-primary-color: #3b82f6;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
 
 /* ── Ghost pill button utility ──────────────────────────────────────────── */
 .btn-ghost-pill {
-  @apply text-slate-400 hover:text-indigo-400 font-medium text-xs bg-slate-800/50 px-2.5 py-1 rounded-md transition-colors;
+  @apply text-slate-300 hover:text-blue-300 font-medium text-xs bg-slate-800/70 px-2.5 py-1 rounded-md border border-slate-700/60 transition-colors;
 }
 
-/* ── Consultai card surface ─────────────────────────────────────────────── */
+/* ── ConsultAI enterprise surface card ──────────────────────────────────── */
 .consultai-card {
-  @apply bg-card border border-border rounded-xl shadow-md hover:shadow-lg transition-all;
+  @apply bg-card border border-border rounded-xl shadow-sm transition-colors;
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.04), 0 4px 16px -4px rgba(0, 0, 0, 0.35);
 }
 
-/* dark mode consultai-card gets heavier shadow tint */
-.dark .consultai-card {
-  @apply shadow-black/30 hover:shadow-black/50;
+/* Subtle hover lift only on fine pointer devices */
+@media (hover: hover) and (pointer: fine) {
+  .interactive-card-lift {
+    transition:
+      transform 180ms var(--ease-out-strong),
+      border-color 180ms var(--ease-out-strong),
+      box-shadow 180ms var(--ease-out-strong);
+  }
+  .interactive-card-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.07), 0 10px 24px -6px rgba(0, 0, 0, 0.45);
+  }
 }

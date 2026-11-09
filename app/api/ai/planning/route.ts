@@ -2,9 +2,18 @@ import { generateText, tool } from "ai";
 import { createGroq } from "@ai-sdk/groq";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { runSupervisorWorkflow } from "@/lib/ai-ops/orchestrator-engine";
-import { isDemoMode } from "@/lib/demo/config";
+import { eq } from "drizzle-orm";
+import { db } from "@/lib/db";
+import { projects } from "@/lib/db/schema";
+import {
+  runSupervisorWorkflow,
+  ScopedAccessError,
+  MissingProjectError,
+} from "@/lib/ai-ops/orchestrator-engine";
+import { isDemoMode, DEMO_IDS } from "@/lib/demo/config";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { getSessionFromCookie } from "@/lib/auth/session";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -37,13 +46,25 @@ const scheduleTask = tool({
 });
 
 export async function POST(request: NextRequest) {
-  const role = await getRoleFromCookie(request.headers.get("cookie"));
+  const cookieHeader = request.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
   if (role !== "company" && role !== "admin") {
     return NextResponse.json(
       { error: "Forbidden: planning AI requires the company or admin role." },
       { status: 403 }
     );
   }
+
+  const ip = getIp(request);
+  const { ok, retryAfterSec } = checkRateLimit("ai-planning", ip, 20, 60);
+  if (!ok) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
+  }
+
   const parsed = requestSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json(
@@ -63,6 +84,43 @@ export async function POST(request: NextRequest) {
     );
 
   if (isRescheduleOrPlan) {
+    // The supervisor workflow reads project data: company scope comes only
+    // from the verified session, the project must be named explicitly and
+    // owned by the scope. (Plain chat below never touches project data.)
+    const scopeCompanyId =
+      role === "admin"
+        ? null
+        : session?.role === "company" && session.companyId
+          ? session.companyId
+          : isDemoMode()
+            ? DEMO_IDS.company
+            : null;
+    if (role === "company" && scopeCompanyId == null) {
+      return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+    }
+    if (!projectId) {
+      return NextResponse.json({ error: "missing_project_id" }, { status: 400 });
+    }
+    if (role === "company" && scopeCompanyId != null) {
+      let ownerCompanyId: string | null | undefined;
+      if (isDemoMode()) {
+        const { getDemoTables } = await import("@/lib/demo/store");
+        ownerCompanyId = getDemoTables().projects.find(
+          (p) => p.id === projectId
+        )?.companyId;
+      } else {
+        const [project] = await db
+          .select({ companyId: projects.companyId })
+          .from(projects)
+          .where(eq(projects.id, projectId))
+          .limit(1);
+        ownerCompanyId = project?.companyId;
+      }
+      if (!ownerCompanyId || ownerCompanyId !== scopeCompanyId) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+    }
+
     try {
       const opType = /(delay|reschedul|shift|slip|postpone|cascade)/.test(q)
         ? "schedule_reschedule"
@@ -76,9 +134,10 @@ export async function POST(request: NextRequest) {
         userRequest: message,
         operationType: opType,
         projectId,
-        actorRole: "company",
-        actorId: "planning-copilot-operator",
+        actorRole: role ?? "company",
+        actorId: session ? `${session.role}:${session.userId}` : "planning-copilot-operator",
         context: { delay_days: delayDays },
+        scopeCompanyId,
       });
 
       const proposal =
@@ -95,6 +154,13 @@ export async function POST(request: NextRequest) {
         toolCalls: [],
       });
     } catch (err) {
+      // Scope denials are authoritative: never fall through to chat on them.
+      if (err instanceof ScopedAccessError) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+      if (err instanceof MissingProjectError) {
+        return NextResponse.json({ error: "missing_project_id" }, { status: 400 });
+      }
       console.warn("[planning-ai] Supervisor delegation warning:", err);
     }
   }

@@ -3,17 +3,10 @@
 /**
  * VettingCard — Candidate card with trust score, matrix, and evidence links.
  *
- * Visual overhaul (AG Studio Midnight):
- * - Dark slate card surface, blue/emerald/amber/rose trust-score badges
- * - Soft emerald/slate tinted CAN/UNKNOWN matrix rows
- * - Ghost pill toggle buttons (no raw blue text links)
- * - Debug payload wrapped in a collapsible <details> accordion
- * - Clean shortlist/re-run action buttons with proper disabled states
- *
- * Design invariants (unchanged):
+ * Design invariants:
  * - Score and matrix come from the API (code-computed), never fabricated in UI
  * - All signals are linked to their source URL
- * - Human-review notice is always displayed
+ * - Page-level human-review notice is displayed on the vetting header; card keeps compact provenance
  */
 
 import { useState, useCallback } from "react";
@@ -47,7 +40,6 @@ export interface VettingCardProps {
   projectId: string;
   onShortlist?: (candidateId: string) => void;
   onRerunVetting?: (candidateId: string) => void;
-  /** Temporary debug payload — requirements sent to LLM + raw LLM output */
   debugPayload?: unknown;
 }
 
@@ -58,27 +50,27 @@ export interface VettingCardProps {
 const MATRIX_STATE_CONFIG = {
   can: {
     icon: "✓",
-    label: "Can",
-    className: "bg-emerald-950/30 border-emerald-800/50 text-emerald-200",
+    label: "Verified",
+    className: "bg-emerald-950/35 border-emerald-700/50 text-emerald-200",
     iconClass: "text-emerald-400",
   },
   partial: {
     icon: "~",
     label: "Partial",
-    className: "bg-amber-950/20 border-amber-800/40 text-amber-200",
+    className: "bg-amber-950/25 border-amber-700/40 text-amber-200",
     iconClass: "text-amber-400",
   },
   no: {
     icon: "✗",
-    label: "Cannot",
-    className: "bg-rose-950/20 border-rose-800/40 text-rose-200",
+    label: "Gap",
+    className: "bg-rose-950/25 border-rose-700/40 text-rose-200",
     iconClass: "text-rose-400",
   },
   unknown: {
     icon: "?",
-    label: "Unknown",
-    className: "bg-slate-800/40 border-slate-700/50 text-slate-400",
-    iconClass: "text-slate-500",
+    label: "Unverified",
+    className: "bg-slate-800/50 border-slate-700/60 text-slate-300",
+    iconClass: "text-slate-400",
   },
 } as const;
 
@@ -91,32 +83,32 @@ function TrustScoreBadge({ score }: { score: number }) {
   if (pct >= 75) {
     return (
       <div className="flex flex-col items-end gap-0.5">
-        <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border bg-emerald-950/80 text-emerald-400 border-emerald-800 text-2xl font-bold tabular-nums">
+        <div className="inline-flex items-baseline gap-1 px-2.5 py-1 rounded-lg border bg-emerald-950/70 text-emerald-300 border-emerald-700/70 font-mono text-2xl font-bold tabular-nums">
           {pct}
-          <span className="text-xs font-normal opacity-70">pts</span>
+          <span className="text-[11px] font-normal text-emerald-400/80">pts</span>
         </div>
-        <span className="text-[10px] text-emerald-500 font-medium">✓ Strong match</span>
+        <span className="text-[10px] text-emerald-400 font-medium">✓ Strong match</span>
       </div>
     );
   }
   if (pct >= 40) {
     return (
       <div className="flex flex-col items-end gap-0.5">
-        <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border bg-amber-950/80 text-amber-400 border-amber-800 text-2xl font-bold tabular-nums">
+        <div className="inline-flex items-baseline gap-1 px-2.5 py-1 rounded-lg border bg-amber-950/70 text-amber-300 border-amber-700/70 font-mono text-2xl font-bold tabular-nums">
           {pct}
-          <span className="text-xs font-normal opacity-70">pts</span>
+          <span className="text-[11px] font-normal text-amber-400/80">pts</span>
         </div>
-        <span className="text-[10px] text-amber-500 font-medium">⚡ Moderate</span>
+        <span className="text-[10px] text-amber-400 font-medium">⚡ Moderate</span>
       </div>
     );
   }
   return (
     <div className="flex flex-col items-end gap-0.5">
-      <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border bg-slate-800 text-slate-400 border-slate-700 text-2xl font-bold tabular-nums">
+      <div className="inline-flex items-baseline gap-1 px-2.5 py-1 rounded-lg border bg-slate-800 text-slate-300 border-slate-700 font-mono text-2xl font-bold tabular-nums">
         {pct}
-        <span className="text-xs font-normal opacity-70">pts</span>
+        <span className="text-[11px] font-normal text-slate-400">pts</span>
       </div>
-      <span className="text-[10px] text-slate-500 font-medium">○ Low signal</span>
+      <span className="text-[10px] text-slate-400 font-medium">○ Low signal</span>
     </div>
   );
 }
@@ -141,10 +133,10 @@ function GhostPill({
       type="button"
       onClick={onToggle}
       className={[
-        "font-medium text-xs px-2.5 py-1 rounded-md transition-colors",
+        "font-medium text-xs px-2.5 py-1 rounded-md transition-colors border",
         active
-          ? "bg-primary/10 text-primary border border-primary/20"
-          : "text-muted-foreground hover:text-foreground bg-muted/40 border border-transparent hover:border-border",
+          ? "bg-blue-500/15 text-blue-300 border-blue-500/35"
+          : "text-slate-300 hover:text-white bg-slate-800/70 border-slate-700/70 hover:border-slate-600",
       ].join(" ")}
     >
       {active ? activeLabel : inactiveLabel}
@@ -165,25 +157,25 @@ function MatrixSummaryBadges({ matrix }: { matrix: MatrixEntry[] }) {
   };
 
   return (
-    <div className="flex items-center gap-1 flex-wrap">
+    <div className="flex items-center gap-1.5 flex-wrap">
       {counts.can > 0 && (
-        <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-950/40 text-emerald-400 border border-emerald-800/50">
-          ✓ {counts.can}
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-md bg-emerald-950/50 text-emerald-300 border border-emerald-700/60 tabular-nums">
+          ✓ {counts.can} Verified
         </span>
       )}
       {counts.partial > 0 && (
-        <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-950/30 text-amber-400 border border-amber-800/40">
-          ~ {counts.partial}
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-md bg-amber-950/40 text-amber-300 border border-amber-700/50 tabular-nums">
+          ~ {counts.partial} Partial
         </span>
       )}
       {counts.no > 0 && (
-        <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-rose-950/30 text-rose-400 border border-rose-800/40">
-          ✗ {counts.no}
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-md bg-rose-950/40 text-rose-300 border border-rose-700/50 tabular-nums">
+          ✗ {counts.no} Gap
         </span>
       )}
       {counts.unknown > 0 && (
-        <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-slate-800/60 text-slate-500 border border-slate-700/50">
-          ? {counts.unknown}
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-md bg-slate-800/80 text-slate-300 border border-slate-700 tabular-nums">
+          {counts.unknown} Unverified
         </span>
       )}
     </div>
@@ -298,39 +290,27 @@ export function VettingCard({
   }
 
   return (
-    <Card className="relative overflow-hidden bg-card border-border shadow-md hover:shadow-lg transition-all duration-200 group">
-      {/* Top accent line — color coded by score */}
-      <div
-        className={[
-          "absolute inset-x-0 top-0 h-0.5",
-          score * 100 >= 75
-            ? "bg-emerald-500"
-            : score * 100 >= 40
-              ? "bg-amber-500"
-              : "bg-slate-600",
-        ].join(" ")}
-      />
-
-      <CardHeader className="pb-2 pt-4">
-        <div className="flex items-start justify-between gap-3">
+    <Card className="relative overflow-hidden rounded-xl bg-[#0f141e] border-slate-800 shadow-md transition-colors hover:border-slate-700 group">
+      <CardHeader className="pb-3 pt-5">
+        <div className="flex items-start justify-between gap-3 pt-2">
           <div className="min-w-0 flex-1">
             {/* Name + rank */}
             <div className="flex items-center gap-2 flex-wrap">
-              <h3 className="font-semibold text-sm text-foreground truncate">{candidate.name}</h3>
+              <h3 className="font-bold text-base text-white truncate">{candidate.name}</h3>
               {candidate.rank && (
-                <span className="text-[11px] font-medium text-muted-foreground bg-muted/60 border border-border px-1.5 py-0.5 rounded-full shrink-0">
+                <span className="font-mono text-[11px] font-semibold tabular-nums text-slate-300 bg-slate-800/90 border border-slate-700 px-1.5 py-0.5 rounded shrink-0">
                   #{candidate.rank}
                 </span>
               )}
               {isShortlisted && (
-                <span className="text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-primary/15 text-primary border border-primary/25 shrink-0">
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30 shrink-0">
                   Shortlisted ✓
                 </span>
               )}
             </div>
 
             {/* Email */}
-            <p className="text-xs text-muted-foreground mt-0.5 truncate">{candidate.email}</p>
+            <p className="text-xs text-slate-300 mt-0.5 truncate">{candidate.email}</p>
 
             {/* GitHub link */}
             {candidate.githubHandle && (
@@ -338,7 +318,7 @@ export function VettingCard({
                 href={`https://github.com/${candidate.githubHandle}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-xs text-primary hover:text-primary/80 transition-colors font-medium"
+                className="inline-flex items-center gap-1 mt-1 text-xs text-blue-400 hover:text-blue-300 transition-colors font-mono font-medium"
               >
                 @{candidate.githubHandle} ↗
               </a>
@@ -346,16 +326,16 @@ export function VettingCard({
 
             {/* LinkedIn link — display only */}
             {candidate.portfolioUrl && candidate.portfolioUrl.includes("linkedin.com") && (
-              <div className="mt-0.5 flex items-center gap-1.5">
+              <div className="mt-1 flex items-center gap-1.5">
                 <a
                   href={candidate.portfolioUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-primary hover:text-primary/80 transition-colors font-medium"
+                  className="text-xs text-blue-400 hover:text-blue-300 transition-colors font-medium"
                 >
                   LinkedIn ↗
                 </a>
-                <span className="text-[10px] text-muted-foreground/70">(display only)</span>
+                <span className="text-[10px] text-slate-400">(display only)</span>
               </div>
             )}
           </div>
@@ -363,31 +343,23 @@ export function VettingCard({
           {/* Trust score badge */}
           <div className="shrink-0">
             <TrustScoreBadge score={score} />
-            <div className="mt-1 flex justify-end">
-              <GhostPill
-                active={showBreakdown}
-                onToggle={() => setShowBreakdown((v) => !v)}
-                activeLabel="hide scoring"
-                inactiveLabel="how scored"
-              />
-            </div>
           </div>
         </div>
 
         {/* Scoring breakdown panel */}
         {showBreakdown && scoreBreakdown && (
-          <div className="mt-2 p-3 rounded-lg border border-border bg-muted/30 text-xs space-y-2">
-            <p className="font-semibold text-muted-foreground uppercase tracking-wide text-[10px]">
+          <div className="mt-3 p-3 rounded-lg border border-slate-800 bg-[#0b0f17] text-xs space-y-2">
+            <p className="font-semibold text-slate-200 text-xs">
               Scoring Breakdown
             </p>
-            <p className="text-muted-foreground text-[11px]">{scoringFormula}</p>
+            <p className="text-slate-300 text-[11px] leading-relaxed">{scoringFormula}</p>
             <div className="grid grid-cols-2 gap-1.5 mt-1">
               {(Object.entries(scoreBreakdown.weights) as [string, number][]).map(([type, weight]) => {
                 const stat = scoreBreakdown.bySignalType[type as keyof typeof scoreBreakdown.bySignalType];
                 return (
-                  <div key={type} className="flex items-center justify-between gap-1 bg-muted/40 rounded px-2 py-1 border border-border/50">
-                    <span className="text-muted-foreground capitalize text-[11px]">{type.replace("_", " ")}</span>
-                    <span className="tabular-nums text-[11px] text-foreground/80 font-mono">
+                  <div key={type} className="flex items-center justify-between gap-1 bg-slate-900 rounded px-2.5 py-1 border border-slate-800">
+                    <span className="text-slate-300 capitalize text-[11px]">{type.replace("_", " ")}</span>
+                    <span className="tabular-nums text-[11px] text-white font-mono">
                       {Math.round(weight * 100)}%
                       {stat ? ` · ${stat.count}` : ""}
                     </span>
@@ -400,44 +372,74 @@ export function VettingCard({
       </CardHeader>
 
       <CardContent className="space-y-3 pt-0">
-        {/* Matrix summary + toggle */}
-        <div className="flex items-center justify-between gap-2">
-          <MatrixSummaryBadges matrix={matrix} />
-          <GhostPill
-            active={showMatrix}
-            onToggle={() => setShowMatrix((v) => !v)}
-            activeLabel="hide matrix"
-            inactiveLabel="full matrix"
-          />
+        {/* Matrix summary + inspection toggles */}
+        <div className="rounded-lg border border-slate-800/80 bg-[#0b0f17] p-3 space-y-2.5">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <MatrixSummaryBadges matrix={matrix} />
+            <span className="text-xs text-slate-300 font-mono tabular-nums">
+              {signals.length} signal{signals.length === 1 ? "" : "s"}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-800/80">
+            <GhostPill
+              active={showMatrix}
+              onToggle={() => setShowMatrix((v) => !v)}
+              activeLabel="Hide Matrix"
+              inactiveLabel="Full Matrix"
+            />
+            {signals.length > 0 && (
+              <GhostPill
+                active={showSignals}
+                onToggle={() => setShowSignals((v) => !v)}
+                activeLabel="Hide Evidence"
+                inactiveLabel="Evidence Signals"
+              />
+            )}
+            <GhostPill
+              active={showBreakdown}
+              onToggle={() => setShowBreakdown((v) => !v)}
+              activeLabel="Hide Weights"
+              inactiveLabel="How Scored"
+            />
+            {candidate.githubHandle && (
+              <GhostPill
+                active={showDiagram}
+                onToggle={() => setShowDiagram((v) => !v)}
+                activeLabel="Hide Chart"
+                inactiveLabel="Quadrant"
+              />
+            )}
+          </div>
         </div>
 
         {/* Full matrix */}
         {showMatrix && matrix.length > 0 && (
-          <div className="space-y-1 text-xs">
-            <p className="text-muted-foreground uppercase tracking-wide text-[10px] font-semibold mb-1.5">
-              Can/Can&apos;t-Do Matrix
+          <div className="space-y-1.5 text-xs">
+            <p className="text-slate-300 text-xs font-semibold">
+              Requirement Verification Matrix
             </p>
             {matrix.map((entry) => {
               const cfg = MATRIX_STATE_CONFIG[entry.state];
               return (
                 <div
                   key={entry.requirementId}
-                  className={`flex items-start gap-2 p-2 rounded-lg border ${cfg.className}`}
+                  className={`flex items-start gap-2 p-2.5 rounded-lg border ${cfg.className}`}
                 >
                   <span className={`font-mono shrink-0 mt-0.5 text-sm ${cfg.iconClass}`}>
                     {cfg.icon}
                   </span>
                   <div className="min-w-0">
-                    <p className="font-medium leading-tight text-[12px]">{entry.requirementDescription}</p>
+                    <p className="font-medium leading-tight text-xs">{entry.requirementDescription}</p>
                     {entry.evidenceSummary && (
-                      <p className="leading-tight mt-0.5 text-[11px] opacity-70">
+                      <p className="leading-tight mt-0.5 text-[11px] opacity-85">
                         {entry.evidenceSummary.slice(0, 120)}
                         {entry.evidenceSummary.length > 120 ? "…" : ""}
                       </p>
                     )}
                     {entry.state === "unknown" && (
-                      <p className="text-[11px] opacity-60 italic mt-0.5">
-                        No evidence found — unknown (not inferred)
+                      <p className="text-[11px] opacity-75 mt-0.5">
+                        No public repository evidence found — not inferred
                       </p>
                     )}
                   </div>
@@ -448,96 +450,61 @@ export function VettingCard({
         )}
 
         {/* Signals (why this candidate) */}
-        {signals.length > 0 && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-muted-foreground font-medium">
-                {signals.length} evidence signals
-              </span>
-              <GhostPill
-                active={showSignals}
-                onToggle={() => setShowSignals((v) => !v)}
-                activeLabel="hide evidence"
-                inactiveLabel="why this candidate"
-              />
-            </div>
-
-            {showSignals && (
-              <div className="space-y-1.5 text-xs">
-                <p className="text-muted-foreground uppercase tracking-wide text-[10px] font-semibold">
-                  Evidence — every signal links to its source
+        {showSignals && signals.length > 0 && (
+          <div className="space-y-1.5 text-xs">
+            <p className="text-slate-300 text-xs font-semibold">
+              Verified Public Evidence Signals
+            </p>
+            {signals.map((sig) => (
+              <div key={sig.id} className="p-2.5 rounded-lg border border-slate-800 bg-[#0b0f17] space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded border border-slate-700 bg-slate-800 text-slate-200">
+                    {sig.signalType.replace("_", " ")}
+                  </span>
+                  <span className="text-emerald-400 font-mono text-[11px] tabular-nums">
+                    {Math.round(sig.confidence * 100)}% conf
+                  </span>
+                  <a
+                    href={sig.sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-400 hover:text-blue-300 truncate max-w-[180px] text-[11px] transition-colors"
+                  >
+                    {sig.sourceUrl.replace(/^https?:\/\//, "").slice(0, 40)}…
+                  </a>
+                </div>
+                <p className="text-slate-200 text-xs">{sig.extractedFact}</p>
+                <p className="font-mono text-[11px] text-slate-400">
+                  &ldquo;{sig.quotedExcerpt}&rdquo;
                 </p>
-                {signals.map((sig) => (
-                  <div key={sig.id} className="p-2 rounded-lg border border-border bg-muted/20 space-y-1">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-border bg-muted/50 text-muted-foreground">
-                        {sig.signalType.replace("_", " ")}
-                      </span>
-                      <span className="text-muted-foreground text-[11px]">
-                        {Math.round(sig.confidence * 100)}% conf
-                      </span>
-                      <a
-                        href={sig.sourceUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary hover:text-primary/80 truncate max-w-[180px] text-[11px] transition-colors"
-                      >
-                        {sig.sourceUrl.replace(/^https?:\/\//, "").slice(0, 40)}…
-                      </a>
-                    </div>
-                    <p className="text-muted-foreground text-[11px]">{sig.extractedFact}</p>
-                    <p className="font-mono text-[10px] italic text-muted-foreground/60">
-                      &ldquo;{sig.quotedExcerpt}&rdquo;
-                    </p>
-                  </div>
-                ))}
               </div>
-            )}
+            ))}
           </div>
         )}
 
         {/* Portfolio quadrant diagram */}
-        {candidate.githubHandle && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-muted-foreground">Portfolio chart</span>
-              <GhostPill
-                active={showDiagram}
-                onToggle={() => setShowDiagram((v) => !v)}
-                activeLabel="hide chart"
-                inactiveLabel="quadrant chart"
+        {showDiagram && candidate.githubHandle && (
+          <div className="mt-1">
+            {diagramResult.ok ? (
+              <GitHubDiagram
+                diagram={diagramResult.mermaid}
+                fallbackText="Portfolio quadrant chart"
               />
-            </div>
-            {showDiagram && (
-              <div className="mt-1">
-                {diagramResult.ok ? (
-                  <GitHubDiagram
-                    diagram={diagramResult.mermaid}
-                    fallbackText="Portfolio quadrant chart"
-                  />
-                ) : (
-                  <p className="text-xs text-muted-foreground italic">{diagramResult.fallbackText}</p>
-                )}
-              </div>
+            ) : (
+              <p className="text-xs text-slate-400">{diagramResult.fallbackText}</p>
             )}
           </div>
         )}
 
-        {/* Human-review notice — always visible */}
-        <div className="text-xs text-amber-300/80 bg-amber-950/20 border border-amber-800/40 rounded-lg p-2.5">
-          <span className="font-semibold text-amber-300">⚠ Human review required: </span>
-          {humanReviewNotice}
-        </div>
-
         {/* DEBUG: wrapped in collapsible accordion */}
         {debugPayload !== undefined && (
           <details className="text-xs">
-            <summary className="cursor-pointer select-none text-[10px] font-mono text-muted-foreground/60 uppercase tracking-wide hover:text-muted-foreground transition-colors py-1">
-              🐛 Developer Debug Logs
+            <summary className="cursor-pointer select-none text-[11px] font-mono text-slate-400 hover:text-slate-200 transition-colors py-1">
+              Developer Debug Trace
             </summary>
             <pre
-              style={{ background: "#0d1117", color: "#00ff41", fontSize: "10px", lineHeight: "1.4" }}
-              className="overflow-auto rounded-lg p-3 max-h-72 whitespace-pre-wrap break-all mt-1 border border-emerald-900/30"
+              style={{ background: "#090c12", color: "#34d399", fontSize: "10px", lineHeight: "1.4" }}
+              className="overflow-auto rounded-lg p-3 max-h-60 whitespace-pre-wrap break-all mt-1 border border-slate-800"
             >
               {JSON.stringify(debugPayload, null, 2)}
             </pre>
@@ -550,10 +517,10 @@ export function VettingCard({
             onClick={handleShortlist}
             disabled={isLoading || isShortlisted}
             className={[
-              "flex-1 text-xs rounded-lg px-3 py-2 font-medium transition-all duration-200",
+              "flex-1 text-xs rounded-lg px-3 py-2 font-semibold transition-all",
               isShortlisted
-                ? "bg-primary/10 text-primary border border-primary/20 cursor-default"
-                : "bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm shadow-primary/20 border border-transparent disabled:opacity-50 disabled:cursor-not-allowed",
+                ? "bg-blue-500/15 text-blue-300 border border-blue-500/30 cursor-default"
+                : "bg-blue-600 text-white hover:bg-blue-500 shadow-sm shadow-blue-600/20 border border-transparent disabled:opacity-50 disabled:cursor-not-allowed",
             ].join(" ")}
           >
             {isShortlisted ? "Shortlisted ✓" : "Shortlist"}
@@ -561,7 +528,7 @@ export function VettingCard({
           <button
             onClick={handleRerun}
             disabled={isLoading}
-            className="text-xs rounded-lg border border-border px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="text-xs font-medium rounded-lg border border-slate-700/80 bg-[#0b0f17] px-3 py-2 text-slate-200 hover:text-white hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             title="Re-run vetting with fresh data"
           >
             {isLoading ? (
@@ -576,7 +543,7 @@ export function VettingCard({
           <button
             onClick={handleExportPdf}
             disabled={isPdfLoading}
-            className="text-xs rounded-lg border border-border px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="text-xs font-medium rounded-lg border border-slate-700/80 bg-[#0b0f17] px-3 py-2 text-slate-200 hover:text-white hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             title="Export Executive PDF report"
           >
             {isPdfLoading ? (

@@ -34,6 +34,7 @@
 import React, { useEffect, useRef } from "react";
 import type { BryntumGantt as BryntumGanttType } from "@bryntum/gantt-react";
 import { toast } from "sonner";
+import { bryntumVanillaFeatureFlags, isMilestoneTask } from "@/lib/gantt/bryntum-config";
 
 // Dynamic import of the heavy Bryntum class — resolved only in the browser.
 // Using require() inside useEffect is the safest pattern for ESM+CJS Bryntum.
@@ -89,18 +90,69 @@ function toTaskRecord(m: GanttMilestone) {
     _originalStart: start,
     // Bryntum uses percentDone for progress; we don't need it here
     percentDone: 0,
+    // Zero-duration / same-day milestones render as diamond gates
+    milestone: isMilestoneTask({
+      startDate: m.startDate ?? null,
+      endDate: m.dueDate ?? null,
+    }),
     // Mark funded / locked tasks as read-only in the Gantt
     readOnly: ["funded","submitted","verifying","pending_approval","paid","disputed","cancelled"].includes(m.status),
   };
 }
 
+/** Finish-to-Start links derived from milestone.dependsOnId (no synthetic deps). */
+function toDependencyRecords(milestones: GanttMilestone[]) {
+  const ids = new Set(milestones.map((m) => m.id));
+  return milestones
+    .filter((m) => m.dependsOnId && ids.has(m.dependsOnId))
+    .map((m) => ({
+      id: `dep-${m.dependsOnId}-${m.id}`,
+      fromTask: m.dependsOnId as string,
+      toTask: m.id,
+      type: 2,
+      lag: m.offsetDays ?? 1,
+      lagUnit: "d",
+    }));
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
+
+type GanttInstance = {
+  destroy?: () => void;
+  taskStore?: {
+    getById?: (id: string) => {
+      startDate?: Date;
+      set?: (k: string, v: unknown) => void;
+    } | null;
+    add?: (record: Record<string, unknown>) => void;
+    remove?: (record: unknown) => void;
+  };
+  dependencyStore?: {
+    getById?: (id: string) => unknown | null;
+    remove?: (record: unknown) => void;
+    add?: (record: Record<string, unknown>) => void;
+  };
+  project?: {
+    taskStore?: {
+      getById?: (id: string) => {
+        startDate?: Date;
+        set?: (k: string, v: unknown) => void;
+      } | null;
+      add?: (record: Record<string, unknown>) => void;
+      remove?: (record: unknown) => void;
+    };
+  };
+};
 
 export function GanttPanel({ projectId, milestones, onReschedule }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const ganttRef = useRef<GanttInstance | null>(null);
   // Keep a stable ref to the latest milestones for use inside event closures
   const milestonesRef = useRef(milestones);
-  milestonesRef.current = milestones;
+  const prevDepIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    milestonesRef.current = milestones;
+  }, [milestones]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -120,7 +172,7 @@ export function GanttPanel({ projectId, milestones, onReschedule }: Props) {
     style.textContent = `@import url('/node_modules_css/@bryntum/gantt/${theme}.css');`;
     // Don't append the style tag — we'll use the direct file path approach instead.
 
-    let gantt: { destroy?: () => void; taskStore?: { getById?: (id: string) => { startDate?: Date; set?: (k: string, v: unknown) => void } | null } } | null = null;
+    let gantt: GanttInstance | null = null;
 
     // Dynamically require Bryntum — runs only in the browser
     void (async () => {
@@ -140,22 +192,73 @@ export function GanttPanel({ projectId, milestones, onReschedule }: Props) {
         }
 
         // Dynamic import — Bryntum is ESM
-        const { Gantt } = await import("@bryntum/gantt") as { Gantt: new (config: Record<string, unknown>) => { destroy?: () => void; taskStore?: { getById?: (id: string) => { startDate?: Date; set?: (k: string, v: unknown) => void } | null } } };
+        const { Gantt } = await import("@bryntum/gantt") as { Gantt: new (config: Record<string, unknown>) => GanttInstance };
 
         const tasks = milestonesRef.current.map(toTaskRecord);
+        const dependencies = toDependencyRecords(milestonesRef.current);
+
+        // Roll back one optimistic dependency-store change after an API rejection.
+        const rollbackDependency = (
+          ganttInst: GanttInstance | null,
+          op: "add" | "remove",
+          dep: { id: string; fromTask: string; toTask: string; lag?: number }
+        ) => {
+          const store = ganttInst?.dependencyStore;
+          if (!store) return;
+          const record = store.getById?.(dep.id);
+          if (op === "add") {
+            if (record) store.remove?.(record);
+          } else if (!record) {
+            store.add?.({ id: dep.id, fromTask: dep.fromTask, toTask: dep.toTask, type: 2, lag: dep.lag ?? 1, lagUnit: "d" });
+          }
+        };
+
+        const persistDependency = async (
+          op: "add" | "remove",
+          dep: { id: string; fromTask: string; toTask: string; lag?: number }
+        ) => {
+          const toastId = toast.loading(
+            op === "add"
+              ? `Linking "${dep.fromTask}" → "${dep.toTask}"…`
+              : `Unlinking "${dep.toTask}"…`
+          );
+          try {
+            const res = await fetch(
+              `/api/projects/${projectId}/milestones/dependencies`,
+              {
+                method: op === "add" ? "POST" : "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(
+                  op === "add"
+                    ? { milestoneId: dep.toTask, dependsOnId: dep.fromTask, offsetDays: dep.lag ?? 1 }
+                    : { milestoneId: dep.toTask }
+                ),
+              }
+            );
+            const data = (await res.json().catch(() => ({}))) as { error?: string };
+            if (!res.ok) {
+              rollbackDependency(ganttRef.current, op, dep);
+              toast.error(`Dependency ${op} failed: ${data.error ?? "unknown error"}`, { id: toastId });
+              return;
+            }
+            toast.success(
+              op === "add" ? `Linked "${dep.fromTask}" → "${dep.toTask}"` : `Unlinked "${dep.toTask}"`,
+              { id: toastId }
+            );
+          } catch (err) {
+            rollbackDependency(ganttRef.current, op, dep);
+            toast.error(
+              `Network error saving dependency: ${err instanceof Error ? err.message : String(err)}`,
+              { id: toastId }
+            );
+          }
+        };
 
         gantt = new Gantt({
           appendTo:  containerRef.current!,
           height:    "100%",
-          // Disable features we don't need (keeps the trial lean)
-          features: {
-            taskEdit:        false,
-            projectLines:    false,
-            criticalPaths:   false,
-            rollups:         false,
-            percentBar:      false,
-            dependencies:    false,
-          },
+          // Shared canonical flags — same source as BryntumGantt.tsx.
+          features: bryntumVanillaFeatureFlags(),
           columns: [
             { type: "name",      text: "Milestone", field: "name",      width: 220 },
             { type: "startdate", text: "Start",     field: "startDate", width: 110 },
@@ -163,6 +266,7 @@ export function GanttPanel({ projectId, milestones, onReschedule }: Props) {
           ],
           project: {
             tasksData: tasks,
+            dependenciesData: dependencies,
           },
 
           // ── taskDrop handler ─────────────────────────────────────────────
@@ -243,8 +347,33 @@ export function GanttPanel({ projectId, milestones, onReschedule }: Props) {
                 );
               }
             },
+
+            // ── Dependency link/unlink persistence ────────────────────────
+            // Bryntum fires these on the dependency store; we persist via the
+            // same dependencies API as the planning console, with rollback.
+            dependencyAdd: async ({ records }: { records: Array<{ id: string; fromTask: string; toTask: string; lag?: number }> }) => {
+              const dep = records[0];
+              if (!dep) return;
+              await persistDependency("add", {
+                id: String(dep.id),
+                fromTask: String(dep.fromTask),
+                toTask: String(dep.toTask),
+                lag: dep.lag ?? 1,
+              });
+            },
+            dependencyRemove: async ({ records }: { records: Array<{ id: string; fromTask: string; toTask: string; lag?: number }> }) => {
+              const dep = records[0];
+              if (!dep) return;
+              await persistDependency("remove", {
+                id: String(dep.id),
+                fromTask: String(dep.fromTask),
+                toTask: String(dep.toTask),
+                lag: dep.lag ?? 1,
+              });
+            },
           },
         });
+        ganttRef.current = gantt;
       } catch (err) {
         console.error("[GanttPanel] Failed to initialise Bryntum Gantt:", err);
         // Leave the container visible — the parent renders the DnD fallback
@@ -252,10 +381,54 @@ export function GanttPanel({ projectId, milestones, onReschedule }: Props) {
     })();
 
     return () => {
+      ganttRef.current = null;
       gantt?.destroy?.();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Intentionally empty: Bryntum manages its own store; use store API for updates
+  }, []); // Construct-once: Bryntum manages its own store; the sync effect below applies prop diffs
+
+  // ── Prop-change subscription ───────────────────────────────────────────────
+  // Applies milestone add/update/remove diffs to the live Bryntum stores so
+  // reschedules, new milestones, and dependency edits reconcile without remount.
+  useEffect(() => {
+    const gantt = ganttRef.current;
+    const store = gantt?.project?.taskStore ?? gantt?.taskStore;
+    if (!gantt || !store) return;
+    for (const m of milestones) {
+      const record = store.getById?.(m.id) as
+        | { set?: (k: string, v: unknown) => void; startDate?: Date }
+        | null
+        | undefined;
+      const mapped = toTaskRecord(m);
+      if (!record) {
+        store.add?.(mapped);
+        continue;
+      }
+      record.set?.("name", mapped.name);
+      record.set?.("startDate", new Date(`${mapped.startDate}T00:00:00Z`));
+      record.set?.("endDate", new Date(`${mapped.endDate}T00:00:00Z`));
+      record.set?.("milestone", mapped.milestone);
+      record.set?.("readOnly", mapped.readOnly);
+      record.set?.("_version", m.version);
+      record.set?.("_status", m.status);
+    }
+    // Dependency diff: add new links, remove ones that disappeared.
+    const depStore = gantt.dependencyStore;
+    if (depStore) {
+      const desired = toDependencyRecords(milestones);
+      const desiredIds = new Set(desired.map((d) => d.id));
+      for (const d of desired) {
+        if (!depStore.getById?.(d.id)) depStore.add?.(d);
+      }
+      for (const prevId of prevDepIds.current) {
+        if (!desiredIds.has(prevId)) {
+          const stale = depStore.getById?.(prevId);
+          if (stale) depStore.remove?.(stale);
+        }
+      }
+      prevDepIds.current = desiredIds;
+    }
+  }, [milestones]);
 
   return (
     <div

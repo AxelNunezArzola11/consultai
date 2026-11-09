@@ -54,6 +54,10 @@ test.describe.serial("demo smoke", () => {
     await page.waitForURL(/\/project\/new\?projectId=.+/);
     // Reloading the planner must NOT create another draft (no write on GET).
     await page.reload();
+    // The saved draft must still resolve after reload (serverless-safe
+    // rehydration): planner renders, not-found screen does not.
+    await expect(page.getByPlaceholder("Describe your project…")).toBeVisible();
+    await expect(page.getByText("Draft project not found")).toHaveCount(0);
     await page.getByPlaceholder("Describe your project…").fill("Plan this project");
     await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect(page.getByText("SIMULATED PLANNING RUN").first()).toBeVisible({ timeout: 30000 });
@@ -151,7 +155,12 @@ test.describe.serial("demo smoke", () => {
     await gotoTimed(page, `/project/${PROJECT}/disputes/demo-dispute-1`);
     await expect(page.getByText(/DEMO-DISP-001|waiting_for_seller/i).first()).toBeVisible();
     await page.getByRole("button", { name: /Analyze Dispute|Re-analyze/ }).click();
-    await expect(page.getByText(/SIMULATED dispute analysis/)).toBeVisible({ timeout: 30000 });
+    // Unique locators (no weakening): exact-text badge + textarea value pin.
+    // The badge renders exactly "SIMULATED dispute analysis" (DisputeView badge
+    // span), while the draft textarea holds the longer "SIMULATED dispute
+    // analysis: ..." value — the ambiguous regex matched both.
+    await expect(page.getByText("SIMULATED dispute analysis", { exact: true })).toBeVisible({ timeout: 30000 });
+    await expect(page.locator("#dispute-response-textarea")).toHaveValue(/SIMULATED dispute analysis/);
     await page.screenshot({ path: `${SHOTS}/10-dispute.png`, fullPage: true });
   });
 
@@ -165,6 +174,15 @@ test.describe.serial("demo smoke", () => {
     expect(beforeRow).toBeDefined();
 
     await gotoTimed(page, `/ai-ops?projectId=${PROJECT}`);
+    // The project dropdown defaults to the newest project (test 3's "Dupe
+    // Check"), which has no scheduling proposals — pin the demo project
+    // explicitly (same assertions, deterministic target), then wait for the
+    // seeded +3d proposal's button: the SSE snapshot swap detaches nodes
+    // rendered for the previously selected project.
+    await page.locator("select").first().selectOption(PROJECT);
+    await expect(
+      page.getByRole("button", { name: /Authorize & Apply/ }).first()
+    ).toBeVisible({ timeout: 30000 });
     const approveResp = page.waitForResponse(
       (r) => r.url().includes("/api/ai-ops/approve") && r.request().method() === "POST"
     );
@@ -279,6 +297,44 @@ test.describe.serial("demo smoke", () => {
     await expect(page.getByText("Milestone Payments")).toBeVisible();
     await expect(page.getByText(/could not load/)).not.toBeVisible();
     await page.screenshot({ path: `${SHOTS}/15-ledger.png`, fullPage: true });
+  });
+
+  test("demo account sign-in: company + freelancer login, refresh persists, logout", async ({ page }) => {
+    const badAuth: string[] = [];
+    page.on("response", (r) => {
+      if (r.url().includes("/api/auth/") && (r.status() === 503 || r.status() === 403)) {
+        badAuth.push(`${r.status()} ${r.url()}`);
+      }
+    });
+
+    // Company demo sign-in via the documented quick-fill
+    await gotoTimed(page, "/login");
+    await page.getByTestId("fill-demo-company").click();
+    await expect(page.locator("#login-email")).toHaveValue(/founder@acme-demo/);
+    await page.getByTestId("login-submit").click();
+    await expect(page).toHaveURL(/\/dashboard/, { timeout: 30000 });
+    await expect(page.getByTestId("authenticated-user-badge")).toBeVisible();
+    // Refresh preserves the session (no bounce to sign-in)
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page.getByTestId("authenticated-user-badge")).toBeVisible();
+    // Logout clears the session and returns to sign-in
+    await page.getByTestId("sign-out-btn").click();
+    await expect(page).toHaveURL(/\/login/);
+    await gotoTimed(page, "/dashboard");
+    await expect(page.getByTestId("authenticated-user-badge")).not.toBeVisible();
+
+    // Freelancer demo sign-in via the documented quick-fill
+    await gotoTimed(page, "/login");
+    await page.getByTestId("fill-demo-freelancer").click();
+    await expect(page.locator("#login-email")).toHaveValue(/alex\.rivera@freelancer-demo/);
+    await page.getByTestId("login-submit").click();
+    await expect(page).toHaveURL(/\/freelancer/, { timeout: 30000 });
+    await expect(page.getByTestId("authenticated-user-badge")).toBeVisible();
+
+    // No service/forbidden failures on any auth endpoint during the flow
+    expect(badAuth).toEqual([]);
+    await page.screenshot({ path: `${SHOTS}/16-demo-login.png`, fullPage: true });
   });
 
   test.afterAll(async () => {

@@ -26,10 +26,18 @@ import { eq, and } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/lib/db";
-import { milestones } from "@/lib/db/schema";
+import { milestones, projects } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { writeAuditLog } from "@/lib/db/audit";
-import { isFunded, addDays } from "@/lib/scheduling/dependency-engine";
+import {
+  isFunded,
+  addDays,
+  recalculateDates,
+  applyDateRecalculation,
+  type MilestoneNode,
+} from "@/lib/scheduling/dependency-engine";
 import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
@@ -98,9 +106,26 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
   // ── Auth ─────────────────────────────────────────────────────────────────
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
-  if (role !== "company") {
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+  if (role !== "company" && role !== "admin") {
     return NextResponse.json({ error: "Forbidden: company role required" }, { status: 403 });
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+  }
+
+  const ip = getIp(req);
+  const { ok, retryAfterSec } = checkRateLimit("milestone-reorder", ip, 30, 60);
+  if (!ok) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
   }
 
   // ── Project ID from path ─────────────────────────────────────────────────
@@ -137,6 +162,12 @@ export async function POST(
   if (isDemoMode()) {
     const { getDemoTables } = await import("@/lib/demo/store");
     const t = getDemoTables();
+    if (session?.role === "company" && session.companyId) {
+      const demoProject = t.projects.find((p) => p.id === projectId);
+      if (!demoProject || demoProject.companyId !== session.companyId) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+    }
     const milestone = t.milestones.find(
       (m) => m.id === milestoneId && m.projectId === projectId
     );
@@ -201,6 +232,26 @@ export async function POST(
     milestone.dueDate = newDueDate ?? milestone.dueDate;
     milestone.version = expectedVersion + 1;
     milestone.updatedAt = new Date();
+    // BFS cascade over the in-memory demo store (funded milestones skipped).
+    const demoNodes: MilestoneNode[] = t.milestones
+      .filter((m) => m.projectId === projectId)
+      .map((m) => ({
+        id: m.id,
+        projectId: m.projectId,
+        title: m.title,
+        dueDate: m.dueDate,
+        status: m.status,
+        dependsOnId: m.dependsOnId,
+        offsetDays: m.offsetDays,
+      }));
+    const demoRecalc = recalculateDates(demoNodes, [milestoneId]);
+    for (const { id, newDueDate: cascadeDue } of demoRecalc.updatedMilestones) {
+      const target = t.milestones.find((m) => m.id === id);
+      if (target && !isFunded(target.status)) {
+        target.dueDate = cascadeDue;
+        target.updatedAt = new Date();
+      }
+    }
     await writeAuditLog({
       entityType: "milestone",
       entityId: milestoneId,
@@ -225,8 +276,24 @@ export async function POST(
       newDueDate,
       version: milestone.version,
       previousVersion: expectedVersion,
+      recalc: {
+        updated: demoRecalc.updatedMilestones,
+        skippedFunded: demoRecalc.skippedFunded,
+        warnings: demoRecalc.warnings,
+      },
       simulated: true,
     });
+  }
+
+  if (session?.role === "company" && session.companyId) {
+    const [project] = await db
+      .select({ companyId: projects.companyId })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+    if (!project || project.companyId !== session.companyId) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
   }
 
   // ── Load the milestone ───────────────────────────────────────────────────
@@ -342,6 +409,9 @@ export async function POST(
 
   const newVersion = updated[0].version;
 
+  // ── BFS cascade: downstream due_dates follow (funded milestones skipped) ──
+  const recalc = await applyDateRecalculation(projectId, [milestoneId]);
+
   // ── Audit log ─────────────────────────────────────────────────────────────
   await writeAuditLog({
     entityType: "milestone",
@@ -358,6 +428,8 @@ export async function POST(
       newVersion,
       dependsOnId:       milestone.dependsOnId ?? null,
       offsetDays:        milestone.offsetDays ?? null,
+      recalcUpdated:     recalc.updatedMilestones.length,
+      recalcSkippedFunded: recalc.skippedFunded,
     },
   });
 
@@ -368,5 +440,10 @@ export async function POST(
     newDueDate,
     version:      newVersion,
     previousVersion: expectedVersion,
+    recalc: {
+      updated:       recalc.updatedMilestones,
+      skippedFunded: recalc.skippedFunded,
+      warnings:      recalc.warnings,
+    },
   });
 }

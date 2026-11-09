@@ -10,6 +10,7 @@ import { ScenarioSimulation } from "@/components/vetting/ScenarioSimulation";
 import type { SimulationCandidate } from "@/components/vetting/ScenarioSimulation";
 import { buildMatrix, buildScoreBreakdown, type Signal, type MatrixEntry } from "@/lib/vetting/signals";
 import type { ScoreBreakdown } from "@/lib/vetting/signals";
+import { normalizeGithubHandle, normalizeCandidateSearchQuery } from "@/lib/vetting/github-handle";
 
 interface CandidateRow {
   id: string;
@@ -76,8 +77,10 @@ export function CandidatesVettingClient({
   function handleSearch(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const params = new URLSearchParams();
-    if (query) params.set("q", query);
-    router.push(`/project/${projectId}/vetting?${params.toString()}`);
+    const normalized = normalizeCandidateSearchQuery(query);
+    if (normalized) params.set("q", normalized);
+    const qs = params.toString();
+    router.push(qs ? `/project/${projectId}/vetting?${qs}` : `/project/${projectId}/vetting`);
   }
 
   function toggleCompare(candidateId: string) {
@@ -90,7 +93,8 @@ export function CandidatesVettingClient({
 
   async function handleAddCandidate(e: React.FormEvent) {
     e.preventDefault();
-    if (!addHandle.trim()) return;
+    const canonicalHandle = normalizeGithubHandle(addHandle);
+    if (!canonicalHandle) return;
     setAddStatus("creating");
     setAddError(null);
 
@@ -99,7 +103,7 @@ export function CandidatesVettingClient({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         projectId,
-        githubHandle: addHandle.trim(),
+        githubHandle: canonicalHandle,
         name:  addName.trim()  || undefined,
         email: addEmail.trim() || undefined,
       }),
@@ -112,23 +116,36 @@ export function CandidatesVettingClient({
       return;
     }
 
-    const { id: candidateId, alreadyExists } = await createRes.json() as { id: string; alreadyExists: boolean };
-
-    const displayName  = addName.trim()  || `@${addHandle.trim()}`;
-    const displayEmail = addEmail.trim() || `${addHandle.trim()}@github.placeholder`;
-    const newCandidate: CandidateRow = {
-      id: candidateId, name: displayName, email: displayEmail,
-      githubHandle: addHandle.trim(), portfolioUrl: null,
-      status: "pending", rank: null, trustScore: null,
-      vettingConsentAt: new Date().toISOString(), vettingRanAt: null,
-      canDo: null, cannotDo: null,
+    const { id: candidateId, candidate: returnedCandidate } = (await createRes.json()) as {
+      id: string;
+      alreadyExists: boolean;
+      candidate?: Partial<CandidateRow>;
     };
 
-    if (!alreadyExists) {
-      setFreshCandidates((prev) => [newCandidate, ...prev]);
-    }
+    const displayName  = returnedCandidate?.name  || addName.trim()  || `@${canonicalHandle}`;
+    const displayEmail = returnedCandidate?.email || addEmail.trim() || `${canonicalHandle}@github.placeholder`;
+    const newCandidate: CandidateRow = {
+      id: candidateId,
+      name: displayName,
+      email: displayEmail,
+      githubHandle: returnedCandidate?.githubHandle ?? canonicalHandle,
+      portfolioUrl: null,
+      status: returnedCandidate?.status ?? "pending",
+      rank: returnedCandidate?.rank ?? null,
+      trustScore: returnedCandidate?.trustScore ?? null,
+      vettingConsentAt: new Date().toISOString(),
+      vettingRanAt: null,
+      canDo: null,
+      cannotDo: null,
+    };
 
-    toast.loading(`Running vetting for @${addHandle.trim()}…`, { id: "add-candidate" });
+    // Always surface the created or matched candidate immediately in client state
+    setFreshCandidates((prev) => [
+      newCandidate,
+      ...prev.filter((c) => c.id !== candidateId),
+    ]);
+
+    toast.loading(`Running vetting for @${canonicalHandle}…`, { id: "add-candidate" });
     setAddStatus("vetting");
 
     const vetRes = await fetch("/api/agent/vetting", {
@@ -144,6 +161,7 @@ export function CandidatesVettingClient({
       setAddStatus("error");
       setAddError(errMsg);
       toast.error(`Vetting failed: ${errMsg}`, { id: "add-candidate" });
+      router.refresh();
       return;
     }
 
@@ -158,7 +176,7 @@ export function CandidatesVettingClient({
     if (data.usedFallback && data.errors && data.errors.length > 0) {
       toast.error(`LLM unavailable — scores will be 0. Reason: ${data.errors[0]}`, { id: "add-candidate" });
     } else {
-      toast.success(`Vetting complete for @${addHandle.trim()}`, { id: "add-candidate" });
+      toast.success(`Vetting complete for @${canonicalHandle}`, { id: "add-candidate" });
     }
 
     setCandidateData((prev) => ({
@@ -174,6 +192,7 @@ export function CandidatesVettingClient({
     setAddStatus("done");
     setAddHandle(""); setAddName(""); setAddEmail("");
     setShowAddForm(false); setAddStatus("idle");
+    router.refresh();
   }
 
   async function runVetting(candidateId: string) {
@@ -343,13 +362,13 @@ export function CandidatesVettingClient({
   }, [allCandidates, candidateData, projectId, humanReviewNotice]);
 
   return (
-    <div className="px-6 py-6 space-y-5">
+    <div className="mx-auto w-full max-w-7xl px-4 sm:px-6 py-7 pb-24 space-y-5">
       {/* ── Page header ─────────────────────────────────────────────────── */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+      <div className="flex items-start justify-between gap-4 flex-wrap border-b border-slate-800/80 pb-5">
         <div>
-          <h1 className="text-xl font-bold text-foreground tracking-tight">Candidate Vetting</h1>
-          <p className="text-muted-foreground text-sm mt-0.5">
-            AI-assisted vetting from public sources. Your decision always.
+          <h1 className="text-2xl font-bold text-white tracking-tight">Candidate Vetting &amp; GitHub Signal Analysis</h1>
+          <p className="text-slate-300 text-xs mt-1">
+            AI-assisted repository &amp; PR signal extraction from public sources. Human hiring decision always required.
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0 flex-wrap">
@@ -458,10 +477,10 @@ export function CandidatesVettingClient({
                   ref={handleInputRef}
                   type="text"
                   value={addHandle}
-                  onChange={(e) => setAddHandle(e.target.value.replace(/^@/, "").replace(/\s/g, ""))}
-                  placeholder="username"
+                  onChange={(e) => setAddHandle(normalizeGithubHandle(e.target.value))}
+                  placeholder="username or https://github.com/username"
                   required
-                  maxLength={39}
+                  maxLength={200}
                   className="flex-1 bg-transparent px-2 py-2 text-sm outline-none"
                   disabled={addStatus === "creating" || addStatus === "vetting"}
                 />

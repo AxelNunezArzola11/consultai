@@ -13,48 +13,167 @@
  *   - query_vetting_summary   — natural-language summary of vetting scores
  *   - smart_reschedule_gantt  — intelligent re-levelling of the entire timeline
  *
- * Protocol:
- *   - Uses toUIMessageStreamResponse() so DefaultChatTransport can parse tool
- *     call events (tool-call / tool-result chunks in UI message stream format).
- *   - toTextStreamResponse() strips tool events — never use it here.
- *
- * Message parsing:
- *   - The AI SDK v6 DefaultChatTransport sends full UIMessage objects (with
- *     `parts` arrays).  We use convertToModelMessages() to convert them to the
- *     ModelMessage[] format that streamText() expects.
- *
- * Resilience:
- *   - If GROQ_API_KEY is missing OR the LLM call fails, we fall back to a
- *     deterministic mock stream so the UI always renders a visible response.
- *
- * Security:
- *   - Only projectId + UIMessage list accepted from the client.
- *   - No DB writes — tools return instructions for the client to execute.
+ * Modes & Honesty Policy:
+ *   - DEMO mode (isDemoMode() === true): Uses deterministic context-aware simulation
+ *     explicitly labeled "DEMO MODE — Simulated Response".
+ *   - LIVE mode (isDemoMode() === false):
+ *     - Requires authenticated company or admin role.
+ *     - Loads active project, milestones, and candidates from DB into the system prompt.
+ *     - Calls Groq live inference. If tool-calling fails on an open-ended question,
+ *       retries live text-only inference on Groq.
+ *     - If GROQ_API_KEY is missing or the live provider fails, returns a clear,
+ *       honest provider error message — NEVER claims a live response is simulated
+ *       or a simulated response is live.
  */
 
-import { streamText, tool, zodSchema, convertToModelMessages, createUIMessageStreamResponse, createUIMessageStream, generateId } from "ai";
+import {
+  streamText,
+  generateText,
+  tool,
+  zodSchema,
+  convertToModelMessages,
+  createUIMessageStreamResponse,
+  createUIMessageStream,
+  generateId,
+} from "ai";
 import { createGroq } from "@ai-sdk/groq";
 import { z } from "zod";
 import { NextRequest } from "next/server";
+import { eq } from "drizzle-orm";
+import { db } from "@/lib/db";
+import { projects, candidates, milestones as milestonesTable } from "@/lib/db/schema";
+import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { isDemoMode } from "@/lib/demo/config";
 
 export const runtime = "nodejs";
 export const maxDuration = 25;
 
-const SYSTEM_PROMPT = `You are ConsultAI's in-product AI assistant, integrated with AG Grid (candidate matrix) and Bryntum Gantt (project timeline).
+interface ProjectContextSummary {
+  projectId: string;
+  projectTitle: string;
+  projectStatus: string;
+  candidateLines: string[];
+  milestoneLines: string[];
+}
 
-You have access to five tools:
+async function loadProjectContext(projectId: string): Promise<ProjectContextSummary> {
+  if (isDemoMode()) {
+    try {
+      const { getDemoTables } = await import("@/lib/demo/store");
+      const t = getDemoTables();
+      const proj = t.projects.find((p) => p.id === projectId) ?? t.projects[0];
+      const cands = t.candidates.filter((c) => c.projectId === (proj?.id ?? projectId));
+      const mls = t.milestones.filter((m) => m.projectId === (proj?.id ?? projectId));
+      return {
+        projectId: proj?.id ?? projectId,
+        projectTitle: proj?.title ?? `Project ${projectId}`,
+        projectStatus: proj?.status ?? "active",
+        candidateLines: cands.map(
+          (c) =>
+            `- ${c.name} (@${c.githubHandle ?? "n/a"}): status=${c.status}, trustScore=${c.trustScore ?? "unvetted"}, rank=${c.rank ?? "-"}`
+        ),
+        milestoneLines: mls.map(
+          (m) =>
+            `- ${m.title}: status=${m.status}, amount=$${Number(m.budgetUsd ?? 0).toFixed(0)}, due=${m.dueDate ?? "TBD"}`
+        ),
+      };
+    } catch {
+      return {
+        projectId,
+        projectTitle: `Project ${projectId}`,
+        projectStatus: "active",
+        candidateLines: [],
+        milestoneLines: [],
+      };
+    }
+  }
+
+  try {
+    const [proj] = await db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+    const cands = await db
+      .select()
+      .from(candidates)
+      .where(eq(candidates.projectId, projectId));
+    const mls = await db
+      .select()
+      .from(milestonesTable)
+      .where(eq(milestonesTable.projectId, projectId));
+
+    return {
+      projectId,
+      projectTitle: proj?.title ?? `Project ${projectId}`,
+      projectStatus: proj?.status ?? "active",
+      candidateLines: cands.map(
+        (c) =>
+          `- ${c.name} (@${c.githubHandle ?? "n/a"}): status=${c.status}, trustScore=${c.trustScore ?? "unvetted"}, rank=${c.rank ?? "-"}`
+      ),
+      milestoneLines: mls.map(
+        (m) =>
+          `- ${m.title}: status=${m.status}, amount=$${Number(m.budgetUsd ?? 0).toFixed(0)}, due=${m.dueDate ?? "TBD"}`
+      ),
+    };
+  } catch {
+    return {
+      projectId,
+      projectTitle: `Project ${projectId}`,
+      projectStatus: "active",
+      candidateLines: [],
+      milestoneLines: [],
+    };
+  }
+}
+
+function buildSystemPrompt(ctx: ProjectContextSummary): string {
+  const candidatesBlock =
+    ctx.candidateLines.length > 0
+      ? ctx.candidateLines.join("\n")
+      : "No candidates recorded for this project yet.";
+  const milestonesBlock =
+    ctx.milestoneLines.length > 0
+      ? ctx.milestoneLines.join("\n")
+      : "No milestones recorded for this project yet.";
+
+  return `You are ConsultAI's in-product AI Vetting & Project Operations Assistant, integrated with AG Grid (candidate matrix) and Bryntum Gantt (project timeline).
+
+Active Project Context:
+- Project ID: ${ctx.projectId}
+- Title: ${ctx.projectTitle}
+- Status: ${ctx.projectStatus}
+
+Candidates in Pipeline:
+${candidatesBlock}
+
+Project Milestones:
+${milestonesBlock}
+
+Available Tools (ONLY invoke a tool when the user explicitly asks to perform an action on the grid or timeline):
 1. filter_candidates       — narrow down candidates by trust score, skill, or status.
 2. assign_candidate        — assign a candidate to a milestone.
 3. reschedule_milestone    — move a single milestone to a new date.
 4. query_vetting_summary   — summarise vetting results.
 5. smart_reschedule_gantt  — intelligently re-level the entire timeline based on capacity or shift delivery phases.
 
-When the user asks to re-level, re-schedule based on availability (e.g. "20 hr/week candidate"), or shift delivery phases by N weeks, always use smart_reschedule_gantt.
+Instructions:
+- For open-ended questions (e.g., comparing candidates, explaining vetting scores, discussing project risks, or recommending next steps), answer directly in clear, concise, authoritative plain English using the Active Project Context above without calling a tool unless needed.
+- Never fabricate verification evidence or claim external actions occurred when they did not.`;
+}
 
-Always respond in plain English. Keep replies concise. Acknowledge when you lack information.`;
+function isActionIntent(userText: string): boolean {
+  const lower = userText.toLowerCase();
+  return (
+    /\b(re.?level|reschedul|shift\s+(?:all\s+)?(?:delivery\s+)?phases|compress\s+timeline|expand\s+timeline)\b/i.test(lower) ||
+    /\b(filter\s+by|show\s+candidates\s+with|only\s+shortlisted)\b/i.test(lower) ||
+    /\b(assign\s+@?[a-z0-9_-]+\s+to)\b/i.test(lower)
+  );
+}
 
-// ── Tool definitions (shared between live + mock paths) ────────────────────────
+// ── Tool definitions (shared between live + demo paths) ────────────────────────
 
 function buildTools(projectId: string) {
   return {
@@ -131,27 +250,23 @@ function buildTools(projectId: string) {
       ].join(" "),
       inputSchema: zodSchema(z.object({
         intent: z.enum([
-          "relevel_capacity",   // adjust durations for a new weekly-hours constraint
-          "shift_phases",       // move all milestones forward/backward by N weeks
-          "compress_timeline",  // shrink all durations by a factor
-          "expand_timeline",    // grow all durations by a factor
+          "relevel_capacity",
+          "shift_phases",
+          "compress_timeline",
+          "expand_timeline",
         ]).describe("The type of reschedule operation"),
-
         weeklyHours: z.number().min(1).max(60).optional()
           .describe("Candidate weekly availability in hours (for relevel_capacity)"),
-
         shiftWeeks: z.number().optional()
           .describe("Positive = push forward, negative = pull back (for shift_phases)"),
-
         scaleFactor: z.number().min(0.1).max(5).optional()
           .describe("Duration multiplier for compress/expand (e.g. 0.75 = 25% shorter)"),
-
         milestones: z.array(z.object({
           id:        z.string(),
           title:     z.string(),
           startDate: z.string().nullable(),
           dueDate:   z.string().nullable(),
-        })).describe("Current milestone list from the Gantt (id, title, startDate, dueDate)"),
+        })).optional().describe("Current milestone list from the Gantt (id, title, startDate, dueDate)"),
       })),
 
       execute: async ({ intent, weeklyHours, shiftWeeks, scaleFactor, milestones: mlList }) => {
@@ -164,10 +279,7 @@ function buildTools(projectId: string) {
         const addDays = (d: Date, days: number): Date =>
           new Date(d.getTime() + days * 86_400_000);
 
-        // When no milestones are provided (e.g. called from Vetting page where
-        // milestones aren't in context), synthesise a demo set so the UI always
-        // renders a visible result.
-        const workingList = mlList.length > 0 ? mlList : [
+        const workingList = (mlList && mlList.length > 0) ? mlList : [
           { id: "demo-1", title: "Discovery & Planning",    startDate: "2025-01-06", dueDate: "2025-01-17" },
           { id: "demo-2", title: "Core Development",        startDate: "2025-01-20", dueDate: "2025-02-28" },
           { id: "demo-3", title: "Testing & QA",            startDate: "2025-03-03", dueDate: "2025-03-14" },
@@ -238,35 +350,37 @@ function buildTools(projectId: string) {
   } as const;
 }
 
-// ── Mock content builder (pure data — no stream) ──────────────────────────────
+// ── DEMO simulation content builder (only used when isDemoMode() === true) ───
 
 interface MockContent {
   assistantText: string;
   toolResult: Record<string, unknown> | null;
 }
 
-/**
- * Honesty wrapper: every mock/simulation path is explicitly labeled so a
- * failed live integration is NEVER presented as a real agent execution.
- */
-function buildMockChunks(userText: string, projectId: string): MockContent {
-  const mock = buildMockChunksRaw(userText, projectId);
+function buildDemoChunks(
+  userText: string,
+  projectId: string,
+  ctx: ProjectContextSummary
+): MockContent {
+  const mock = buildDemoChunksRaw(userText, projectId, ctx);
   return {
     assistantText:
-      "SIMULATED RESPONSE — no live AI ran for this message. " +
-      mock.assistantText,
+      "[DEMO MODE — Simulated Response] " + mock.assistantText,
     toolResult: mock.toolResult
       ? { ...mock.toolResult, simulated: true }
       : null,
   };
 }
 
-function buildMockChunksRaw(userText: string, projectId: string): MockContent {
+function buildDemoChunksRaw(
+  userText: string,
+  projectId: string,
+  ctx: ProjectContextSummary
+): MockContent {
   const lower = userText.toLowerCase();
   const isReschedule = /re.?level|hr.*week|week.*hr|shift|reschedul|timeline|capacity/i.test(lower);
-  const isFilter     = /filter|trust|score|skill|shortlist/i.test(lower);
-  const isAssign     = /assign/i.test(lower);
-  const isSummary    = /summar|vetting|who|candidates/i.test(lower);
+  const isFilter     = /filter|trust\s*score\s*>\s*\d+|only\s*shortlisted/i.test(lower);
+  const isAssign     = /assign\s+/i.test(lower);
 
   if (isReschedule) {
     const weeklyHoursMatch = lower.match(/(\d+)\s*hr/);
@@ -308,13 +422,19 @@ function buildMockChunksRaw(userText: string, projectId: string): MockContent {
   }
 
   if (isFilter) {
+    const scoreMatch = lower.match(/(\d+)/);
+    const minScore = scoreMatch ? parseInt(scoreMatch[1], 10) : 70;
+    const skillMatch = lower.match(/by\s+([a-z0-9.+_-]+)\s+skill/i);
+    const skill = skillMatch ? skillMatch[1] : undefined;
     return {
-      assistantText: "I've applied a trust score ≥ 70 filter to the candidate grid.",
+      assistantText: skill
+        ? `I've filtered the candidate grid for skill "${skill}".`
+        : `I've applied a trust score ≥ ${minScore} filter to the candidate grid.`,
       toolResult: {
         action: "filter_candidates",
         projectId,
-        criteria: { minTrustScore: 70 },
-        message: "Filter: trust ≥ 70",
+        criteria: skill ? { skill } : { minTrustScore: minScore },
+        message: skill ? `Filter: skill "${skill}"` : `Filter: trust ≥ ${minScore}`,
       },
     };
   }
@@ -332,39 +452,44 @@ function buildMockChunksRaw(userText: string, projectId: string): MockContent {
     };
   }
 
-  if (isSummary) {
-    return {
-      assistantText: "I'm summarising the shortlisted candidates for this project.",
-      toolResult: {
-        action:  "query_vetting_summary",
-        projectId,
-        focus:   "shortlisted",
-        message: `Generating shortlisted summary for project ${projectId}`,
-      },
-    };
-  }
+  // Open-ended question in DEMO mode: provide context-aware answer from demo project data
+  const candidateSummary =
+    ctx.candidateLines.length > 0
+      ? `Current candidates for "${ctx.projectTitle}":\n${ctx.candidateLines.join("\n")}`
+      : `No candidates are registered yet for "${ctx.projectTitle}".`;
+  const milestoneSummary =
+    ctx.milestoneLines.length > 0
+      ? `\n\nActive milestones:\n${ctx.milestoneLines.join("\n")}`
+      : "";
 
-  // Generic help — no tool
   return {
-    assistantText: 'I can help you filter candidates, re-level the Gantt timeline, or summarise vetting results. Try asking: "Re-level timeline for a 20 hr/week candidate" or "Shift delivery phases by 2 weeks".',
+    assistantText: `Based on the project "${ctx.projectTitle}" (${ctx.projectStatus}):\n\n${candidateSummary}${milestoneSummary}\n\nYou can ask me to filter candidates by trust score or skill, compare top candidates, or re-level the Bryntum Gantt timeline.`,
     toolResult: null,
   };
 }
 
-// ── Mock stream builder (wraps buildMockChunks in a UIMessageStreamResponse) ──
-
-function buildMockStream(userText: string, projectId: string): Response {
-  const mock = buildMockChunks(userText, projectId);
+function buildTextStreamResponse(text: string, toolResult?: Record<string, unknown> | null): Response {
   const stream = createUIMessageStream({
     execute: ({ writer }) => {
       const textId = generateId();
       writer.write({ type: "text-start", id: textId });
-      writer.write({ type: "text-delta", id: textId, delta: mock.assistantText });
+      writer.write({ type: "text-delta", id: textId, delta: text });
       writer.write({ type: "text-end",   id: textId });
-      if (mock.toolResult) {
-        const callId = `mock-${Date.now()}`;
-        writer.write({ type: "tool-input-available",  toolCallId: callId, toolName: mock.toolResult.action as string, input: {}, dynamic: true });
-        writer.write({ type: "tool-output-available", toolCallId: callId, output: mock.toolResult, dynamic: true });
+      if (toolResult) {
+        const callId = `tool-${Date.now()}`;
+        writer.write({
+          type: "tool-input-available",
+          toolCallId: callId,
+          toolName: toolResult.action as string,
+          input: {},
+          dynamic: true,
+        });
+        writer.write({
+          type: "tool-output-available",
+          toolCallId: callId,
+          output: toolResult,
+          dynamic: true,
+        });
       }
     },
   });
@@ -374,10 +499,36 @@ function buildMockStream(userText: string, projectId: string): Response {
 // ── Route handler ──────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  // ── Parse body ─────────────────────────────────────────────────────────────
+  // Authorization check: requires company or admin role
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+  if (role !== "company" && role !== "admin") {
+    return Response.json(
+      { error: "Forbidden: Vetting Assistant requires company or admin role." },
+      { status: 403 }
+    );
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return Response.json({ error: "missing_company_context" }, { status: 403 });
+  }
+
+  const ip = getIp(req);
+  const { ok, retryAfterSec } = checkRateLimit("agent-harness", ip, 20, 60);
+  if (!ok) {
+    return Response.json(
+      { error: "Rate limit exceeded" },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
+  }
+
+  // Parse body
   let body: { messages?: unknown[]; projectId?: string };
   try {
-    body = await req.json() as { messages?: unknown[]; projectId?: string };
+    body = (await req.json()) as { messages?: unknown[]; projectId?: string };
   } catch {
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
@@ -385,10 +536,34 @@ export async function POST(req: NextRequest) {
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return Response.json({ error: "messages array required" }, { status: 400 });
   }
+  if (body.messages.length > 100) {
+    return Response.json({ error: "messages array too large" }, { status: 400 });
+  }
 
-  const projectId = typeof body.projectId === "string" ? body.projectId : "unknown";
+  const projectId = typeof body.projectId === "string" ? body.projectId.trim() : "";
+  if (!projectId || projectId.length > 100) {
+    return Response.json({ error: "projectId required" }, { status: 400 });
+  }
 
-  // Extract last user message text — used for mock fallback routing
+  if (session?.role === "company" && session.companyId) {
+    let ownerCompanyId: string | null | undefined;
+    if (isDemoMode()) {
+      const { getDemoTables } = await import("@/lib/demo/store");
+      ownerCompanyId = getDemoTables().projects.find((p) => p.id === projectId)?.companyId;
+    } else {
+      const [project] = await db
+        .select({ companyId: projects.companyId })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .limit(1);
+      ownerCompanyId = project?.companyId;
+    }
+    if (!ownerCompanyId || ownerCompanyId !== session.companyId) {
+      return Response.json({ error: "forbidden" }, { status: 403 });
+    }
+  }
+
+  // Extract last user message text
   const rawMessages = body.messages as Array<{ role?: string; content?: unknown; parts?: unknown[] }>;
   const lastUserMsg = [...rawMessages].reverse().find((m) => m.role === "user");
   const lastUserText = (() => {
@@ -401,22 +576,32 @@ export async function POST(req: NextRequest) {
     return typeof lastUserMsg.content === "string" ? lastUserMsg.content : "";
   })();
 
-  // ── Top-level safety wrapper — ALWAYS returns 200 ─────────────────────────
-  // Any synchronous or asynchronous error (missing key, rate limit, SDK schema
-  // mismatch, network timeout) falls through to buildMockStream so useChat
-  // never receives a non-200 response and never fires onError.
-  try {
-    // Demo mode → deterministic labeled simulation (never contacts Groq or the DB)
-    if (isDemoMode()) {
-      return buildMockStream(lastUserText, projectId);
-    }
-    // No key → deterministic mock immediately
-    if (!process.env.GROQ_API_KEY) {
-      console.warn("[Harness Route] Falling back to mock stream: GROQ_API_KEY not set");
-      return buildMockStream(lastUserText, projectId);
-    }
+  // Load real project/candidate/milestone context
+  const projectContext = await loadProjectContext(projectId);
 
-    // Convert SDK v6 UIMessage parts format → ModelMessage[] for streamText
+  // 1. DEMO MODE: deterministic, context-aware simulated response explicitly labeled
+  if (isDemoMode()) {
+    const demo = buildDemoChunks(lastUserText, projectId, projectContext);
+    return buildTextStreamResponse(demo.assistantText, demo.toolResult);
+  }
+
+  // 2. LIVE MODE: verify AI provider configuration
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    return Response.json(
+      {
+        error: "ai_provider_unconfigured",
+        message: "Live AI provider (Groq) is not configured. Set GROQ_API_KEY or enable DEMO_MODE.",
+      },
+      { status: 503 }
+    );
+  }
+
+  const systemPrompt = buildSystemPrompt(projectContext);
+  const groq = createGroq({ apiKey });
+  const modelName = process.env.LLM_GROQ_MODEL || "llama-3.3-70b-versatile";
+
+  try {
     const uiMessages = rawMessages.map((m) => ({
       role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
       parts: Array.isArray(m.parts)
@@ -424,37 +609,50 @@ export async function POST(req: NextRequest) {
         : [{ type: "text" as const, text: typeof m.content === "string" ? m.content : "" }],
     }));
 
+    const useTools = isActionIntent(lastUserText);
+    const tools = useTools ? buildTools(projectId) : undefined;
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const modelMessages = await convertToModelMessages(uiMessages as any, {
-      tools: buildTools(projectId),
+      ...(tools ? { tools } : {}),
       ignoreIncompleteToolCalls: true,
     });
 
-    const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+    // For open-ended questions (or as primary path), use generateText or streamText
+    // and fall back to text-only live call if tool-calling schema fails on Groq.
+    if (!useTools) {
+      try {
+        const { text } = await generateText({
+          model: groq(modelName),
+          system: systemPrompt,
+          messages: modelMessages,
+          maxOutputTokens: 600,
+          temperature: 0.3,
+        });
+        return buildTextStreamResponse(text.trim() || "No response generated by the model.");
+      } catch (primaryErr) {
+        // Fallback to llama-3.1-8b-instant in case the primary model is rate-limited
+        const { text } = await generateText({
+          model: groq("llama-3.1-8b-instant"),
+          system: systemPrompt,
+          messages: modelMessages,
+          maxOutputTokens: 600,
+          temperature: 0.3,
+        });
+        void primaryErr;
+        return buildTextStreamResponse(text.trim() || "No response generated by the model.");
+      }
+    }
 
-    // streamText() is lazy — it does not contact Groq until the stream is
-    // consumed.  Errors that occur mid-stream (after HTTP 200 is sent) are
-    // handled by the onError option on toUIMessageStream(), which converts them
-    // to a clean { type: "error" } chunk instead of aborting the connection.
-    // We wrap the whole stream in createUIMessageStream so we can intercept
-    // mid-stream failures and fall back to mock chunks without changing status.
     const result = streamText({
-      model:           groq("llama-3.1-8b-instant"),
-      system:          SYSTEM_PROMPT,
+      model:           groq(modelName),
+      system:          systemPrompt,
       messages:        modelMessages,
       maxOutputTokens: 512,
-      temperature:     0.3,
-      tools:           buildTools(projectId),
+      temperature:     0.2,
+      tools,
     });
 
-    // Wrap the live LLM stream in an outer createUIMessageStream so that any
-    // mid-stream Groq failure (rate limit, auth, timeout) is caught and
-    // replaced with deterministic mock content — never an error chunk.
-    //
-    // We use a manual async pump loop instead of writer.merge() so we have full
-    // control over error interception.  writer.merge() catches errors via
-    // .catch() and converts them to { type: "error" } chunks (which triggers
-    // useChat.onError client-side) — we want to suppress that entirely.
     const llmStream = result.toUIMessageStream();
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
@@ -463,39 +661,46 @@ export async function POST(req: NextRequest) {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            // Drop any error chunks from the LLM stream — inject mock instead
             if (value && typeof value === "object" && (value as { type?: string }).type === "error") {
-              const errText = (value as { errorText?: string }).errorText ?? "unknown";
-              console.warn("[Harness Route] LLM stream error chunk — injecting mock:", errText);
-              reader.cancel().catch(() => { /* ignore */ });
-              // Write mock content in place of the error
-              const mock = buildMockChunks(lastUserText, projectId);
-              const textId = generateId();
-              writer.write({ type: "text-start", id: textId });
-              writer.write({ type: "text-delta", id: textId, delta: mock.assistantText });
-              writer.write({ type: "text-end",   id: textId });
-              if (mock.toolResult) {
-                const callId = `fallback-${Date.now()}`;
-                writer.write({ type: "tool-input-available",  toolCallId: callId, toolName: mock.toolResult.action as string, input: {}, dynamic: true });
-                writer.write({ type: "tool-output-available", toolCallId: callId, output: mock.toolResult, dynamic: true });
+              const errText = (value as { errorText?: string }).errorText ?? "AI provider stream error";
+              reader.cancel().catch(() => {});
+              // Retry once without tools so open-ended or borderline queries still get a real LIVE AI response
+              try {
+                const { text: retryText } = await generateText({
+                  model: groq("llama-3.1-8b-instant"),
+                  system: systemPrompt,
+                  messages: modelMessages,
+                  maxOutputTokens: 512,
+                  temperature: 0.3,
+                });
+                const textId = generateId();
+                writer.write({ type: "text-start", id: textId });
+                writer.write({ type: "text-delta", id: textId, delta: retryText });
+                writer.write({ type: "text-end",   id: textId });
+              } catch {
+                const textId = generateId();
+                writer.write({ type: "text-start", id: textId });
+                writer.write({
+                  type: "text-delta",
+                  id: textId,
+                  delta: `AI Provider Error: Unable to complete live inference (${errText}). Please retry in a moment.`,
+                });
+                writer.write({ type: "text-end", id: textId });
               }
               break;
             }
             writer.write(value);
           }
         } catch (pumpErr) {
-          // Network or SDK error mid-stream — fall back to mock
-          console.warn("[Harness Route] Falling back to mock stream (pump error):", pumpErr);
-          const mock = buildMockChunks(lastUserText, projectId);
+          const msg = pumpErr instanceof Error ? pumpErr.message : "Live AI stream interrupted";
           const textId = generateId();
           writer.write({ type: "text-start", id: textId });
-          writer.write({ type: "text-delta", id: textId, delta: mock.assistantText });
-          writer.write({ type: "text-end",   id: textId });
-          if (mock.toolResult) {
-            const callId = `fallback-${Date.now()}`;
-            writer.write({ type: "tool-input-available",  toolCallId: callId, toolName: mock.toolResult.action as string, input: {}, dynamic: true });
-            writer.write({ type: "tool-output-available", toolCallId: callId, output: mock.toolResult, dynamic: true });
-          }
+          writer.write({
+            type: "text-delta",
+            id: textId,
+            delta: `AI Provider Error: ${msg}`,
+          });
+          writer.write({ type: "text-end", id: textId });
         } finally {
           reader.releaseLock();
         }
@@ -503,11 +708,11 @@ export async function POST(req: NextRequest) {
     });
 
     return createUIMessageStreamResponse({ stream });
-
-  } catch (outerErr) {
-    // Last-resort catch: JSON parse errors, convertToModelMessages throws, etc.
-    // Always return 200 with a mock stream so the client never sees an error.
-    console.warn("[Harness Route] Falling back to mock stream:", outerErr);
-    return buildMockStream(lastUserText, projectId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unexpected AI provider failure";
+    return Response.json(
+      { error: "ai_inference_failed", message: `Live AI inference failed: ${msg}` },
+      { status: 502 }
+    );
   }
 }

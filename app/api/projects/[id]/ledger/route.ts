@@ -4,7 +4,9 @@
  * Returns milestone rows in the shape FinancialLedger expects.
  * Also joins the shortlisted candidate (consultant field) per project if available.
  *
- * Auth: no role check — same project-level visibility as the milestones page.
+ * Auth: company/admin role required; company sessions are scoped to their
+ * own company's projects (cross-company IDs return 403).
+ * Rate-limited (poll endpoint).
  * Returns 200 { rows: LedgerRow[] } or 404.
  */
 
@@ -14,13 +16,44 @@ import { db } from "@/lib/db";
 import { projects, milestones, candidates } from "@/lib/db/schema";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+  if (role !== "company" && role !== "admin") {
+    return NextResponse.json(
+      {
+        error: "forbidden",
+        message: "Company financial ledgers require the company or admin role.",
+      },
+      { status: 403 }
+    );
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+  }
+
+  const ip = getIp(req);
+  const { ok, retryAfterSec } = checkRateLimit("ledger", ip, 120, 60);
+  if (!ok) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
+  }
+
   const { id: projectId } = await params;
 
   if (isDemoMode()) {
@@ -28,6 +61,16 @@ export async function GET(
     const project = t.projects.find((p) => p.id === projectId);
     if (!project) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    if (
+      session?.role === "company" &&
+      session.companyId &&
+      project.companyId !== session.companyId
+    ) {
+      return NextResponse.json(
+        { error: "forbidden", message: "Project belongs to another company." },
+        { status: 403 }
+      );
     }
     const rows = t.milestones
       .filter((m) => m.projectId === projectId)
@@ -48,13 +91,23 @@ export async function GET(
   }
 
   const [project] = await db
-    .select({ id: projects.id })
+    .select({ id: projects.id, companyId: projects.companyId })
     .from(projects)
     .where(eq(projects.id, projectId))
     .limit(1);
 
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
+  }
+  if (
+    session?.role === "company" &&
+    session.companyId &&
+    project.companyId !== session.companyId
+  ) {
+    return NextResponse.json(
+      { error: "forbidden", message: "Project belongs to another company." },
+      { status: 403 }
+    );
   }
 
   // Fetch milestones

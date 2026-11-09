@@ -5,7 +5,7 @@
  * Currently supported fields:
  *   - githubRepoUrl (string | null)
  *
- * Auth: requires company role cookie.
+ * Auth: requires company/admin role; company sessions are scoped to their own projects.
  * Returns 200 { ok: true } on success, 404 if not found, 403 if unauthorized.
  *
  * ─────────────────────────────────────────────────────────────────────────────
@@ -20,7 +20,7 @@
  * Deletes are done sequentially, leaves-first, so any partial failure
  * is safe to retry — later deletes always succeed once earlier ones pass.
  *
- * Auth: requires company role cookie.
+ * Auth: requires company/admin role; company sessions are scoped to their own projects.
  * Returns 200 { ok: true } on success, 404 if not found, 403 if unauthorized.
  *
  * Deletion order:
@@ -50,9 +50,18 @@ import {
   cascadeLog,
 } from "@/lib/db/schema";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { isDemoMode } from "@/lib/demo/config";
 
 export const dynamic = "force-dynamic";
+
+async function getAuth(req: NextRequest) {
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+  return { session, role };
+}
 
 // ---------------------------------------------------------------------------
 // PATCH — update mutable project fields (e.g. githubRepoUrl)
@@ -64,14 +73,23 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
-  if (role !== "company") {
+  const { session, role } = await getAuth(req);
+  if (role !== "company" && role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const { id: projectId } = await params;
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+  }
 
-  let body: { githubRepoUrl?: string | null };
+  const { id: projectId } = await params;
+  if (projectId.length > 100) {
+    return NextResponse.json({ error: "Invalid project id" }, { status: 400 });
+  }
+
+  let body: { githubRepoUrl?: string | null; projectTitle?: string };
   try {
     body = await req.json();
   } catch {
@@ -93,9 +111,29 @@ export async function PATCH(
 
   if (isDemoMode()) {
     const { getDemoTables } = await import("@/lib/demo/store");
-    const project = getDemoTables().projects.find((p) => p.id === projectId);
+    const {
+      demoCompanyForSession,
+      resolveDemoDraftForPlanning,
+    } = await import("@/lib/demo/drafts");
+    let project = getDemoTables().projects.find((p) => p.id === projectId);
+    // Serverless-safe: a cold instance rehydrates the POST-accepted draft
+    // from the creation title; bare IDs still 404 honestly.
+    if (!project) {
+      const rehydrated = resolveDemoDraftForPlanning({
+        projectId,
+        title: body.projectTitle,
+        companyId: demoCompanyForSession(session?.companyId),
+      });
+      if (rehydrated) {
+        project = getDemoTables().projects.find((p) => p.id === projectId);
+      }
+    }
     if (!project) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    if (session?.role === "company" && session.companyId &&
+        project.companyId !== session.companyId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
     project.githubRepoUrl = body.githubRepoUrl ?? null;
     project.updatedAt = new Date();
@@ -104,13 +142,17 @@ export async function PATCH(
 
   try {
     const [existing] = await db
-      .select({ id: projects.id })
+      .select({ id: projects.id, companyId: projects.companyId })
       .from(projects)
       .where(eq(projects.id, projectId))
       .limit(1);
 
     if (!existing) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    if (session?.role === "company" && session.companyId &&
+        existing.companyId !== session.companyId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
     await db
@@ -133,20 +175,28 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
-  // ── Diagnostic: log env availability on every invocation ──────────────────
-  console.log("[delete-project] env check:", {
-    DATABASE_URL: !!process.env.DATABASE_URL,
-    ROLE_COOKIE_SECRET: !!process.env.ROLE_COOKIE_SECRET,
-  });
-
-  // Auth check — only company role can delete projects
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
-  if (role !== "company") {
+  // Auth check — only company/admin roles can delete projects
+  const { session, role } = await getAuth(req);
+  if (role !== "company" && role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+  }
+
+  const deleteIp = getIp(req);
+  const deleteLimit = checkRateLimit("project-delete", deleteIp, 10, 300);
+  if (!deleteLimit.ok) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      { status: 429, headers: { "Retry-After": String(deleteLimit.retryAfterSec) } }
+    );
+  }
+
   const { id: projectId } = await params;
-  console.log("[delete-project] projectId:", projectId);
 
   if (isDemoMode()) {
     const { getDemoTables, appendDemoAudit } = await import("@/lib/demo/store");
@@ -161,6 +211,10 @@ export async function DELETE(
     const idx = t.projects.findIndex((p) => p.id === projectId);
     if (idx < 0) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    if (session?.role === "company" && session.companyId &&
+        t.projects[idx].companyId !== session.companyId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
     t.projects.splice(idx, 1);
     t.milestones = t.milestones.filter((m) => m.projectId !== projectId);
@@ -181,13 +235,17 @@ export async function DELETE(
   try {
     // Verify the project exists before attempting deletion
     const [existing] = await db
-      .select({ id: projects.id })
+      .select({ id: projects.id, companyId: projects.companyId })
       .from(projects)
       .where(eq(projects.id, projectId))
       .limit(1);
 
     if (!existing) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    if (session?.role === "company" && session.companyId &&
+        existing.companyId !== session.companyId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
     // ── Collect IDs needed for child-table deletes ─────────────────────────

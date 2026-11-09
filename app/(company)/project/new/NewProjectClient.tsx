@@ -42,6 +42,8 @@ const GanttView = dynamic(
 interface NewProjectClientProps {
   projectId: string;
   initialBrief?: string;
+  /** Creation title; threaded to planner APIs for demo rehydration. */
+  initialTitle?: string;
   feePolicy: FeePolicy;
 }
 
@@ -49,7 +51,7 @@ interface NewProjectClientProps {
 // Draft save (debounced)
 // ---------------------------------------------------------------------------
 
-function useDraftSave(projectId: string, agentSessionId: string) {
+function useDraftSave(projectId: string, agentSessionId: string, projectTitle?: string) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   return useCallback(
@@ -60,7 +62,7 @@ function useDraftSave(projectId: string, agentSessionId: string) {
           await fetch("/api/agent/brief-draft", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ projectId, agentSessionId, plan }),
+            body: JSON.stringify({ projectId, agentSessionId, plan, projectTitle }),
           });
         } catch {
           // Non-fatal: draft save failure doesn't block the user
@@ -68,7 +70,7 @@ function useDraftSave(projectId: string, agentSessionId: string) {
         }
       }, 1000);
     },
-    [projectId, agentSessionId]
+    [projectId, agentSessionId, projectTitle]
   );
 }
 
@@ -80,7 +82,7 @@ function useDraftSave(projectId: string, agentSessionId: string) {
 // GitHub repo URL input (persisted to DB on blur)
 // ---------------------------------------------------------------------------
 
-function useGithubRepoSave(projectId: string) {
+function useGithubRepoSave(projectId: string, projectTitle?: string) {
   return useCallback(
     async (url: string) => {
       if (!url) return;
@@ -88,13 +90,13 @@ function useGithubRepoSave(projectId: string) {
         await fetch(`/api/projects/${projectId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ githubRepoUrl: url || null }),
+          body: JSON.stringify({ githubRepoUrl: url || null, projectTitle }),
         });
       } catch {
         console.warn("[NewProjectClient] GitHub repo URL save failed");
       }
     },
-    [projectId]
+    [projectId, projectTitle]
   );
 }
 
@@ -105,6 +107,7 @@ function useGithubRepoSave(projectId: string) {
 export function NewProjectClient({
   projectId,
   initialBrief,
+  initialTitle,
   feePolicy,
 }: NewProjectClientProps) {
   // Stable agent session ID for this browser session
@@ -123,10 +126,10 @@ export function NewProjectClient({
 
   // GitHub repo URL (linked repository for milestone auto-evaluation)
   const [githubRepoUrl, setGithubRepoUrl] = useState("");
-  const saveGithubRepo = useGithubRepoSave(projectId);
+  const saveGithubRepo = useGithubRepoSave(projectId, initialTitle);
 
   // Draft save
-  const saveDraft = useDraftSave(projectId, agentSessionId);
+  const saveDraft = useDraftSave(projectId, agentSessionId, initialTitle);
 
   // When plan updates, save draft + show Gantt
   const handlePlanUpdate = useCallback(
@@ -243,6 +246,7 @@ export function NewProjectClient({
             onPlanUpdate={handlePlanUpdate}
             onLLMError={handleLLMError}
             initialBrief={initialBrief}
+            projectTitle={initialTitle}
           />
         </div>
       </div>

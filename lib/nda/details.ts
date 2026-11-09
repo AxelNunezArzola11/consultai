@@ -65,7 +65,19 @@ export async function resolveNdaDetails(
   if (!nda) return { ok: false, error: "invalid_or_expired_token" };
 
   if (nda.status === "accepted") {
-    return { ok: false, error: "already_accepted" };
+    // Verify the presented raw token matches the stored hash (ignoring used flag)
+    // so only the holder of the real invite token sees "already_accepted".
+    const replayValidation = validateInviteToken(
+      rawToken,
+      nda.inviteTokenHash ?? null,
+      false,
+      nda.inviteTokenExpiresAt ?? null,
+      (nda.inviteTokenRateLimit ?? 0) + 1
+    );
+    if (replayValidation.valid) {
+      return { ok: false, error: "already_accepted" };
+    }
+    return { ok: false, error: "invalid_or_expired_token" };
   }
   if (nda.status === "expired" || nda.status === "declined") {
     return { ok: false, error: "invalid_or_expired_token" };

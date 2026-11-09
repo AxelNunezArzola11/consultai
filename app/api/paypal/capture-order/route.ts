@@ -30,7 +30,7 @@ import { eq } from "drizzle-orm";
 
 import { paypalFetch, safeJson } from "@/lib/paypal/client";
 import { db } from "@/lib/db";
-import { payments, milestones } from "@/lib/db/schema";
+import { payments, milestones, projects } from "@/lib/db/schema";
 import {
   assertMilestoneTransition,
   assertPaymentTransition,
@@ -39,6 +39,7 @@ import {
 } from "@/lib/state-machines/milestone-payment";
 import { writeAuditLog } from "@/lib/db/audit";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { isDemoMode } from "@/lib/demo/config";
 import { demoBlocked } from "@/lib/demo/guard";
@@ -48,9 +49,17 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (isDemoMode()) return demoBlocked("PayPal order capture");
   // ── Auth: require role=company or role=admin cookie ───────────────────────
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
   if (role !== "company" && role !== "admin") {
     return NextResponse.json({ error: "Forbidden: company or admin role required" }, { status: 403 });
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
   }
 
   // ── Rate limit: 20 captures per IP per 60 s ───────────────────────────────
@@ -68,7 +77,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const orderID    = body?.orderID    as string | undefined;
   const paymentId  = body?.paymentId  as string | undefined;
 
-  if (!orderID || !paymentId) {
+  if (!orderID || typeof orderID !== "string" || orderID.length > 100 ||
+      !paymentId || typeof paymentId !== "string" || paymentId.length > 100) {
     return NextResponse.json({ error: "orderID and paymentId required" }, { status: 400 });
   }
 
@@ -81,6 +91,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (!paymentRow) {
     return NextResponse.json({ error: "Payment not found" }, { status: 404 });
+  }
+
+  // Bind the submitted PayPal order ID to the stored payment row so a caller
+  // cannot capture a foreign PayPal order against this payment.
+  if (paymentRow.paypalOrderId && paymentRow.paypalOrderId !== orderID) {
+    return NextResponse.json({ error: "orderID does not match payment" }, { status: 400 });
+  }
+
+  if (session?.role === "company" && session.companyId && paymentRow.milestoneId) {
+    const [milestone] = await db
+      .select({ projectId: milestones.projectId })
+      .from(milestones)
+      .where(eq(milestones.id, paymentRow.milestoneId))
+      .limit(1);
+    const [project] = milestone
+      ? await db
+          .select({ companyId: projects.companyId })
+          .from(projects)
+          .where(eq(projects.id, milestone.projectId))
+          .limit(1)
+      : [];
+    if (!milestone || !project || project.companyId !== session.companyId) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
   }
 
   // Idempotency: if already captured, return the existing data

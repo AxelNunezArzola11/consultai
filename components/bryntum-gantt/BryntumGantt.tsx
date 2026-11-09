@@ -35,6 +35,10 @@ import type {
   Store,
   Model,
 } from "@bryntum/gantt";
+import {
+  bryntumReactFeatureFlags,
+  isMilestoneTask,
+} from "@/lib/gantt/bryntum-config";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public data types
@@ -105,10 +109,20 @@ export interface BryntumGanttProps {
   onApproveProposal?: (proposal: SchedulingProposalPreview) => Promise<void>;
   onRejectProposal?: (proposal: SchedulingProposalPreview) => Promise<void>;
   onTaskChange?: (task: GanttTask) => void;
+  onDependencyChange?: (op: "add" | "update" | "remove", dep: GanttDependency) => void;
   onExternalDrop?: (payload: unknown, targetDate: Date) => void;
   onAiMessage?: (message: string) => Promise<string>;
   ganttRef?: RefObject<BryntumGanttClass | null>;
   className?: string;
+  /** Server load failure — renders an honest error panel instead of seed data. */
+  loadError?: string | null;
+  /** Explicit empty state (zero milestones) — renders an empty panel, never seed. */
+  isEmpty?: boolean;
+  /**
+   * Opt-in seed demo. DEFAULT_* seed rows render ONLY when this is true.
+   * Without it, undefined tasks render a loading panel and [] renders empty.
+   */
+  showSeedDemo?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,10 +196,14 @@ export default function BryntumGantt({
   onApproveProposal,
   onRejectProposal,
   onTaskChange,
+  onDependencyChange,
   onExternalDrop,
   onAiMessage,
   ganttRef: externalGanttRef,
   className,
+  loadError = null,
+  isEmpty = false,
+  showSeedDemo = false,
 }: BryntumGanttProps) {
   const internalGanttRef = useRef<BryntumGanttClass | null>(null);
   const ganttRef = externalGanttRef ?? internalGanttRef;
@@ -320,16 +338,33 @@ export default function BryntumGantt({
       changes: object;
     }) => {
       const record = event?.record ?? event?.records?.[0];
-      const data = (record as unknown as { data?: GanttTask } | undefined)?.data;
-      if (data) {
-        onTaskChange?.(data);
+      const data = (record as unknown as { data?: Record<string, unknown> } | undefined)?.data;
+      if (!data) return;
+      // Dependency store records carry fromTask/toTask; task store records do not.
+      if ("fromTask" in data || "toTask" in data) {
+        const op: "add" | "update" | "remove" =
+          event.action === "add" ? "add" : event.action === "remove" || event.action === "removeAll" ? "remove" : "update";
+        onDependencyChange?.(op, {
+          id: data.id as string | number,
+          fromTask: data.fromTask as string | number,
+          toTask: data.toTask as string | number,
+          type: (data.type as 0 | 1 | 2 | 3 | undefined) ?? 2,
+          lag: (data.lag as number | undefined) ?? 0,
+          lagUnit: (data.lagUnit as GanttDependency["lagUnit"]) ?? "d",
+        });
+        return;
       }
+      onTaskChange?.(data as unknown as GanttTask);
     },
-    [onTaskChange]
+    [onTaskChange, onDependencyChange]
   );
 
+  // Seed rows render ONLY behind the explicit showSeedDemo opt-in.
+  const usingSeedDemo = showSeedDemo && (!tasks || tasks.length === 0);
+
   const projectTasks = useMemo(() => {
-    if (!tasks || tasks.length === 0) return DEFAULT_TASKS;
+    if (usingSeedDemo) return DEFAULT_TASKS;
+    if (!tasks || tasks.length === 0) return [];
     return tasks.map((t) => ({
       id: t.id,
       name: t.name,
@@ -344,14 +379,13 @@ export default function BryntumGantt({
           endDate: t.endDate ?? t.startDate,
         },
       ],
-      ...({ milestone: Boolean(t.milestone) } as Partial<TaskModelConfig>),
+      ...({ milestone: isMilestoneTask(t) } as Partial<TaskModelConfig>),
     }));
-  }, [tasks]);
+  }, [tasks, usingSeedDemo]);
 
   const projectDependencies = useMemo(() => {
-    if (!dependencies || dependencies.length === 0) {
-      return tasks && tasks.length > 0 ? [] : DEFAULT_DEPENDENCIES;
-    }
+    if (usingSeedDemo) return DEFAULT_DEPENDENCIES;
+    if (!dependencies || dependencies.length === 0) return [];
     return dependencies.map((d) => ({
       id: d.id,
       fromTask: d.fromTask,
@@ -360,7 +394,10 @@ export default function BryntumGantt({
       lag: d.lag ?? 0,
       lagUnit: d.lagUnit ?? "d",
     }));
-  }, [dependencies, tasks]);
+  }, [dependencies, usingSeedDemo]);
+
+  // Shared canonical flags (same source as GanttPanel vanilla config).
+  const sharedFeatures = bryntumReactFeatureFlags(criticalPathEnabled);
 
   // Compute timeline window dynamically around tasks
   const { timelineStart, timelineEnd } = useMemo(() => {
@@ -637,6 +674,24 @@ export default function BryntumGantt({
         }}
       >
         <div style={{ flex: 1, minHeight: 0, height: "100%", minWidth: 0, overflow: "hidden" }}>
+          {loadError ? (
+            <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+              <div className="text-sm font-semibold text-rose-400">Schedule failed to load</div>
+              <p className="max-w-md text-xs text-slate-400">{loadError}</p>
+            </div>
+          ) : tasks === undefined && !usingSeedDemo && !isEmpty ? (
+            <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+              <div className="text-sm font-semibold text-slate-200">Loading schedule…</div>
+              <p className="max-w-md text-xs text-slate-500">Fetching milestones from the database.</p>
+            </div>
+          ) : (isEmpty || (tasks !== undefined && tasks.length === 0)) && !usingSeedDemo ? (
+            <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+              <div className="text-sm font-semibold text-slate-200">No scheduled milestones yet</div>
+              <p className="max-w-md text-xs text-slate-500">
+                Drag backlog tasks from the left panel onto the timeline, or create milestones from a project brief.
+              </p>
+            </div>
+          ) : (
           <BryntumGanttWidget
             ref={ganttRef}
             tasks={projectTasks}
@@ -650,13 +705,15 @@ export default function BryntumGantt({
             barMargin={6}
             enableTransactionalFeatures={true}
             detectCSSCompatibilityIssues={false}
-            criticalPathsFeature={{ disabled: !criticalPathEnabled }}
+            criticalPathsFeature={sharedFeatures.criticalPathsFeature}
+            dependenciesFeature={sharedFeatures.dependenciesFeature}
             baselinesFeature={{ disabled: !baselinesEnabled }}
             percentBarFeature={{ disabled: false }}
             cellEditFeature={{ disabled: false }}
             taskMenuFeature={{ disabled: false }}
             onDataChange={handleDataChange}
           />
+          )}
         </div>
 
         {/* ── Task Detail & Resource Assignment Side Panel ─────────────────── */}

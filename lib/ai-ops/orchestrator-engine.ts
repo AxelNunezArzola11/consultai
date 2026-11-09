@@ -24,6 +24,9 @@ import {
   paymentProposals,
   verificationRuns,
   auditLog,
+  ndas,
+  meetings,
+  disputes,
 } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/db/audit";
 import { desc, eq, sql } from "drizzle-orm";
@@ -78,6 +81,34 @@ export interface MilestoneAdjustmentItem {
   delta_days: number;
   expected_version: number;
   reason: string;
+}
+
+/**
+ * Thrown when a company-scoped caller asks for data outside its company, or
+ * when a non-admin caller requests the global (unscoped) view. Routes map
+ * this to 403. Never carries tenant data in the message (non-disclosing).
+ */
+export class ScopedAccessError extends Error {
+  readonly status = 403;
+  readonly code = "company_scope_required";
+  constructor(message = "forbidden") {
+    super(message);
+    this.name = "ScopedAccessError";
+  }
+}
+
+/**
+ * Thrown when a supervisor workflow is invoked without an explicit projectId.
+ * There is no global-project fallback: callers must name the project. Routes
+ * map this to 400.
+ */
+export class MissingProjectError extends Error {
+  readonly status = 400;
+  readonly code = "missing_project_id";
+  constructor(message = "missing_project_id") {
+    super(message);
+    this.name = "MissingProjectError";
+  }
 }
 
 let tablesInitialized = false;
@@ -389,18 +420,38 @@ export async function runSupervisorWorkflow(params: {
   actorRole?: "company" | "freelancer" | "admin";
   actorId?: string;
   context?: Record<string, unknown>;
+  /**
+   * Owning company the run is scoped to. Null is admin-only (global run).
+   * The scope comes only from the verified session (resolved by the route),
+   * never from client input. Checked before any DB read/write or backend call.
+   */
+  scopeCompanyId: string | null;
 }) {
+  const actorRole = params.actorRole ?? "company";
+  if (params.scopeCompanyId == null && actorRole !== "admin") {
+    throw new ScopedAccessError("company scope required");
+  }
+  if (params.projectId == null || params.projectId === "") {
+    throw new MissingProjectError("projectId is required");
+  }
+
   await ensureAiOpsTables();
 
   const { isDemoMode: isDemo } = await import("@/lib/demo/config");
   if (isDemo()) {
+    if (params.scopeCompanyId != null) {
+      const { getDemoTables } = await import("@/lib/demo/store");
+      const demoProj = getDemoTables().projects.find((p) => p.id === params.projectId);
+      if (!demoProj || demoProj.companyId !== params.scopeCompanyId) {
+        throw new ScopedAccessError("project outside company scope");
+      }
+    }
     return runSimulatedSupervisorWorkflow(params);
   }
 
   const startedAt = Date.now();
   const executionId = `exec-${nanoid(12)}`;
   const actorId = params.actorId ?? "company-operator";
-  const actorRole = params.actorRole ?? "company";
   const opType = params.operationType ?? "auto";
 
   // 1. Try Python FastAPI Multi-Agent Backend first if BACKEND_API_URL is configured
@@ -455,25 +506,21 @@ export async function runSupervisorWorkflow(params: {
   let totalTokens = 0;
 
   const tDbStart = Date.now();
-  let targetProject = null;
-  if (params.projectId) {
-    const [p] = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, params.projectId))
-      .limit(1);
-    targetProject = p ?? null;
-  }
-  if (!targetProject) {
-    const [latest] = await db
-      .select()
-      .from(projects)
-      .orderBy(desc(projects.createdAt))
-      .limit(1);
-    targetProject = latest ?? null;
+  // Explicit project only: the latest-project-global fallback was removed, so
+  // a run can never silently attach to another company's project.
+  const [p] = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, params.projectId))
+    .limit(1);
+  const targetProject = p ?? null;
+  if (params.scopeCompanyId != null) {
+    if (!targetProject || targetProject.companyId !== params.scopeCompanyId) {
+      throw new ScopedAccessError("project outside company scope");
+    }
   }
 
-  const resolvedProjectId = targetProject?.id ?? params.projectId ?? "proj-default";
+  const resolvedProjectId = targetProject?.id ?? params.projectId;
   const dbMilestones = targetProject
     ? await db
         .select()
@@ -487,6 +534,7 @@ export async function runSupervisorWorkflow(params: {
         .from(candidates)
         .where(eq(candidates.projectId, targetProject.id))
     : [];
+  const dbMilestoneIds = new Set(dbMilestones.map((m) => m.id));
 
   toolCalls.push({
     tool_name: "database.fetch_project_context",
@@ -613,11 +661,19 @@ export async function runSupervisorWorkflow(params: {
           timestamp: new Date().toISOString(),
         });
       } else if (agentName === "delivery_agent") {
-        const recentRuns = await db
+        const allRecentRuns = await db
           .select()
           .from(verificationRuns)
           .orderBy(desc(verificationRuns.createdAt))
-          .limit(3);
+          .limit(params.scopeCompanyId != null ? 25 : 3);
+        // Company scope: only runs against this project's milestones may
+        // inform the verdict/evidence (no cross-company PR references).
+        const recentRuns =
+          params.scopeCompanyId != null
+            ? allRecentRuns
+                .filter((r) => dbMilestoneIds.has(r.milestoneId))
+                .slice(0, 3)
+            : allRecentRuns;
 
         const latestRun = recentRuns[0];
         const trustScore = latestRun?.policyDecision === "AUTO_RELEASE_ELIGIBLE" ? 90 : 84;
@@ -978,21 +1034,69 @@ export async function runSupervisorWorkflow(params: {
   };
 }
 
-export async function getAiOpsDashboardSnapshot(projectId?: string) {
+export interface AiOpsSnapshotScope {
+  projectId?: string;
+  /**
+   * Owning company the snapshot is scoped to. Null is admin-only (global).
+   * The scope comes only from the verified session (resolved by the caller),
+   * never from client input.
+   */
+  scopeCompanyId: string | null;
+  role: "company" | "admin";
+}
+
+export async function getAiOpsDashboardSnapshot(scope: AiOpsSnapshotScope) {
+  const { projectId, scopeCompanyId, role } = scope;
+  if (scopeCompanyId == null && role !== "admin") {
+    throw new ScopedAccessError("company scope required");
+  }
   await ensureAiOpsTables();
 
   const { isDemoMode: isDemo } = await import("@/lib/demo/config");
   if (isDemo()) {
     const { getDemoTables } = await import("@/lib/demo/store");
     const t = getDemoTables();
+    if (scopeCompanyId == null) {
+      return shapeAiOpsSnapshot(
+        t.agentExecutions,
+        t.schedulingProposals,
+        t.paymentProposals,
+        t.approvals,
+        t.verificationRuns,
+        t.auditLog,
+        projectId
+      );
+    }
+    const allowedProjectIds = new Set(
+      t.projects
+        .filter((pr) => pr.companyId === scopeCompanyId)
+        .map((pr) => pr.id)
+    );
+    if (projectId != null && !allowedProjectIds.has(projectId)) {
+      throw new ScopedAccessError("project outside company scope");
+    }
+    const attr = demoAttribution(t, allowedProjectIds);
+    const [fExecs, fSched, fPay, fApprovals, fVerifs, fAudits] =
+      filterAiOpsRowsForScope(
+        {
+          execRows: t.agentExecutions,
+          schedPropRows: t.schedulingProposals,
+          payPropRows: t.paymentProposals,
+          approvalRows: t.approvals,
+          verifRows: t.verificationRuns,
+          recentAuditRows: t.auditLog,
+        },
+        attr,
+        projectId ?? null
+      );
     return shapeAiOpsSnapshot(
-      t.agentExecutions,
-      t.schedulingProposals,
-      t.paymentProposals,
-      t.approvals,
-      t.verificationRuns,
-      t.auditLog,
-      projectId
+      fExecs,
+      fSched,
+      fPay,
+      fApprovals,
+      fVerifs,
+      fAudits,
+      undefined
     );
   }
 
@@ -1042,15 +1146,229 @@ export async function getAiOpsDashboardSnapshot(projectId?: string) {
       .catch(() => []),
   ]);
 
+  if (scopeCompanyId == null) {
+    return shapeAiOpsSnapshot(
+      execRows,
+      schedPropRows,
+      payPropRows,
+      approvalRows,
+      verifRows,
+      recentAuditRows,
+      projectId
+    );
+  }
+
+  // Company scope: attribute every section to owning projects. Attribution
+  // misses fail closed (empty maps filter everything out).
+  const [
+    scopedProjects,
+    msAttr,
+    candAttr,
+    payAttr,
+    ndaAttr,
+    meetAttr,
+    disputeAttr,
+  ] = await Promise.all([
+    db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.companyId, scopeCompanyId))
+      .catch(() => []),
+    db
+      .select({ id: milestones.id, projectId: milestones.projectId })
+      .from(milestones)
+      .catch(() => []),
+    db
+      .select({ id: candidates.id, projectId: candidates.projectId })
+      .from(candidates)
+      .catch(() => []),
+    db
+      .select({ id: payments.id, milestoneId: payments.milestoneId })
+      .from(payments)
+      .catch(() => []),
+    db
+      .select({ id: ndas.id, projectId: ndas.projectId })
+      .from(ndas)
+      .catch(() => []),
+    db
+      .select({ id: meetings.id, projectId: meetings.projectId })
+      .from(meetings)
+      .catch(() => []),
+    db
+      .select({ id: disputes.id, milestoneId: disputes.milestoneId })
+      .from(disputes)
+      .catch(() => []),
+  ]);
+  const allowedProjectIds = new Set(scopedProjects.map((p) => p.id));
+  if (projectId != null && !allowedProjectIds.has(projectId)) {
+    throw new ScopedAccessError("project outside company scope");
+  }
+  const attr: AiOpsAttribution = {
+    allowedProjectIds,
+    milestoneToProject: new Map(msAttr.map((r) => [r.id, r.projectId])),
+    candidateToProject: new Map(candAttr.map((r) => [r.id, r.projectId])),
+    paymentToMilestone: new Map(payAttr.map((r) => [r.id, r.milestoneId])),
+    ndaToProject: new Map(ndaAttr.map((r) => [r.id, r.projectId])),
+    meetingToProject: new Map(meetAttr.map((r) => [r.id, r.projectId])),
+    disputeToMilestone: new Map(disputeAttr.map((r) => [r.id, r.milestoneId])),
+    schedProposalToProject: new Map(
+      schedPropRows.map((sp) => [sp.id, sp.projectId])
+    ),
+    execToProject: new Map(execRows.map((e) => [e.id, e.projectId])),
+  };
+  const [fExecs, fSched, fPay, fApprovals, fVerifs, fAudits] =
+    filterAiOpsRowsForScope(
+      {
+        execRows,
+        schedPropRows,
+        payPropRows,
+        approvalRows,
+        verifRows,
+        recentAuditRows,
+      },
+      attr,
+      projectId ?? null
+    );
   return shapeAiOpsSnapshot(
-    execRows,
-    schedPropRows,
-    payPropRows,
-    approvalRows,
-    verifRows,
-    recentAuditRows,
-    projectId
+    fExecs,
+    fSched,
+    fPay,
+    fApprovals,
+    fVerifs,
+    fAudits,
+    undefined
   );
+}
+
+interface AiOpsAttribution {
+  allowedProjectIds: Set<string>;
+  milestoneToProject: Map<string, string>;
+  candidateToProject: Map<string, string>;
+  paymentToMilestone: Map<string, string | null>;
+  ndaToProject: Map<string, string>;
+  meetingToProject: Map<string, string>;
+  disputeToMilestone: Map<string, string | null>;
+  schedProposalToProject: Map<string, string>;
+  execToProject: Map<string, string | null>;
+}
+
+type DemoTables = ReturnType<
+  typeof import("@/lib/demo/store").getDemoTables
+>;
+
+function demoAttribution(
+  t: DemoTables,
+  allowedProjectIds: Set<string>
+): AiOpsAttribution {
+  return {
+    allowedProjectIds,
+    milestoneToProject: new Map(t.milestones.map((m) => [m.id, m.projectId])),
+    candidateToProject: new Map(t.candidates.map((c) => [c.id, c.projectId])),
+    paymentToMilestone: new Map(t.payments.map((p) => [p.id, p.milestoneId])),
+    ndaToProject: new Map(t.ndas.map((n) => [n.id, n.projectId])),
+    meetingToProject: new Map(t.meetings.map((m) => [m.id, m.projectId])),
+    disputeToMilestone: new Map(t.disputes.map((d) => [d.id, d.milestoneId])),
+    schedProposalToProject: new Map(
+      t.schedulingProposals.map((sp) => [sp.id, sp.projectId])
+    ),
+    execToProject: new Map(t.agentExecutions.map((e) => [e.id, e.projectId])),
+  };
+}
+
+/** Owning project for an audit row, or null when unattributable (dropped). */
+function resolveAuditProjectId(
+  entityType: string,
+  entityId: string,
+  attr: AiOpsAttribution
+): string | null {
+  switch (entityType) {
+    case "project":
+      return attr.allowedProjectIds.has(entityId) ? entityId : null;
+    case "milestone":
+      return attr.milestoneToProject.get(entityId) ?? null;
+    case "candidate":
+      return attr.candidateToProject.get(entityId) ?? null;
+    case "payment": {
+      const msId = attr.paymentToMilestone.get(entityId);
+      return (msId && attr.milestoneToProject.get(msId)) ?? null;
+    }
+    case "nda":
+      return attr.ndaToProject.get(entityId) ?? null;
+    case "meeting":
+      return attr.meetingToProject.get(entityId) ?? null;
+    case "dispute": {
+      const msId = attr.disputeToMilestone.get(entityId);
+      return (msId && attr.milestoneToProject.get(msId)) ?? null;
+    }
+    case "scheduling_proposal":
+      return attr.schedProposalToProject.get(entityId) ?? null;
+    case "agent_execution":
+      return attr.execToProject.get(entityId) ?? null;
+    default:
+      return null;
+  }
+}
+
+interface AiOpsRowSets {
+  execRows: Array<typeof agentExecutions.$inferSelect>;
+  schedPropRows: Array<typeof schedulingProposals.$inferSelect>;
+  payPropRows: Array<typeof paymentProposals.$inferSelect>;
+  approvalRows: Array<typeof approvals.$inferSelect>;
+  verifRows: Array<typeof verificationRuns.$inferSelect>;
+  recentAuditRows: Array<typeof auditLog.$inferSelect>;
+}
+
+function inScopeProject(
+  projectId: string | null | undefined,
+  attr: AiOpsAttribution,
+  target: string | null
+): projectId is string {
+  if (projectId == null) return false;
+  if (!attr.allowedProjectIds.has(projectId)) return false;
+  return target == null || projectId === target;
+}
+
+/**
+ * Company-scope filter for EVERY snapshot section. Unattributable rows
+ * (null project, unknown milestone, unknown audit entity) are dropped.
+ * When `target` (explicit projectId) is set, sections narrow to it.
+ */
+function filterAiOpsRowsForScope(
+  rows: AiOpsRowSets,
+  attr: AiOpsAttribution,
+  target: string | null
+): [
+  AiOpsRowSets["execRows"],
+  AiOpsRowSets["schedPropRows"],
+  AiOpsRowSets["payPropRows"],
+  AiOpsRowSets["approvalRows"],
+  AiOpsRowSets["verifRows"],
+  AiOpsRowSets["recentAuditRows"],
+] {
+  const fExecs = rows.execRows.filter((e) =>
+    inScopeProject(e.projectId, attr, target)
+  );
+  const fSched = rows.schedPropRows.filter((sp) =>
+    inScopeProject(sp.projectId, attr, target)
+  );
+  const fPay = rows.payPropRows.filter((pp) =>
+    inScopeProject(attr.milestoneToProject.get(pp.milestoneId), attr, target)
+  );
+  const fApprovals = rows.approvalRows.filter((a) =>
+    inScopeProject(attr.milestoneToProject.get(a.milestoneId), attr, target)
+  );
+  const fVerifs = rows.verifRows.filter((vr) =>
+    inScopeProject(attr.milestoneToProject.get(vr.milestoneId), attr, target)
+  );
+  const fAudits = rows.recentAuditRows.filter((al) => {
+    const pid = resolveAuditProjectId(al.entityType, al.entityId, attr);
+    return (
+      pid != null &&
+      attr.allowedProjectIds.has(pid) &&
+      (target == null || pid === target)
+    );
+  });
+  return [fExecs, fSched, fPay, fApprovals, fVerifs, fAudits];
 }
 
 // Shared shaping for live rows and offline demo fixtures — one code path.

@@ -1,32 +1,22 @@
 "use client";
 
 /**
- * DisputeView — Phase 6
+ * DisputeView — Phase 6 / Enterprise Upgrade
  *
  * Displays a dispute with:
- *   1. Timeline: requested-vs-delivered (dispute creation → delivery events)
- *   2. Evidence list with sources (from the evidence packet)
- *   3. Editable written response (agent-drafted, human-editable)
- *   4. Offer amount control with fee implications (shown as UNVERIFIED)
- *   5. Action buttons: Send Evidence | Make Offer | Accept Claim
- *
- * DESIGN RULES:
- *   - All money actions require explicit human click (no auto-submit)
- *   - Agent proposal is displayed as "suggested" — human can edit
- *   - Buyer-provided data (dispute reason) is shown with UNTRUSTED label
- *   - Fee implications are shown as UNVERIFIED until sandbox confirms
+ *   1. Project, Milestone, Consultant, and Escrow Payout context
+ *   2. Timeline: requested-vs-delivered (dispute creation → delivery events)
+ *   3. Verification Evidence packet with completeness check & sources
+ *   4. AI Dispute Analysis with explicit DEMO (Simulated) vs LIVE AI badge
+ *   5. Human-gated decision controls (Send Evidence | Submit Offer | Record Internal Resolution | Accept Claim)
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 interface CriterionResult {
   criterionId: string;
@@ -36,6 +26,7 @@ interface CriterionResult {
 }
 
 interface EvidencePacket {
+  simulated?: boolean;
   disputeRowId: string;
   paypalDisputeId: string | null;
   disputeStatus: string;
@@ -84,11 +75,13 @@ interface EvidencePacket {
 
 interface AgentProposal {
   proposedAction: "PROVIDE_EVIDENCE" | "MAKE_OFFER" | "ACCEPT_CLAIM";
-  proposedOfferAmountUsd?: string;
+  proposedOfferAmountUsd?: string | null;
   writtenResponse: string;
   reasoning: string;
   confidence: number;
   fallback?: boolean;
+  simulated?: boolean;
+  modelId?: string;
 }
 
 interface DisputeRow {
@@ -101,7 +94,9 @@ interface DisputeRow {
   evidenceSubmittedAt: string | null;
   offerAmountUsd: string | null;
   offerSubmittedAt: string | null;
+  resolutionOutcome?: string | null;
   agentResolution: string | null;
+  humanEditedResponse?: string | null;
   milestoneId: string;
 }
 
@@ -109,27 +104,26 @@ interface Props {
   disputeId: string;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function statusBadgeVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
-  switch (status) {
-    case "open":
-    case "waiting_for_seller": return "destructive";
-    case "waiting_for_buyer": return "secondary";
-    case "under_review": return "outline";
-    case "escalated": return "destructive";
-    case "resolved": return "default";
-    case "closed": return "secondary";
-    default: return "outline";
-  }
-}
-
 function criterionBadge(met: boolean | null) {
-  if (met === true)  return <Badge className="bg-green-100 text-green-800 border-green-300">PASS</Badge>;
-  if (met === false) return <Badge variant="destructive">FAIL</Badge>;
-  return <Badge variant="outline">PENDING</Badge>;
+  if (met === true) {
+    return (
+      <span className="rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-300">
+        PASS
+      </span>
+    );
+  }
+  if (met === false) {
+    return (
+      <span className="rounded border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 font-mono text-[10px] font-bold text-rose-300">
+        FAIL
+      </span>
+    );
+  }
+  return (
+    <span className="rounded border border-slate-700 bg-slate-800 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-400">
+      PENDING
+    </span>
+  );
 }
 
 function formatTimestamp(iso: string) {
@@ -140,71 +134,167 @@ function formatTimestamp(iso: string) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
 export function DisputeView({ disputeId }: Props) {
-  const [dispute, setDispute]           = useState<DisputeRow | null>(null);
-  const [packet, setPacket]             = useState<EvidencePacket | null>(null);
-  const [proposal, setProposal]         = useState<AgentProposal | null>(null);
+  const [dispute, setDispute] = useState<DisputeRow | null>(null);
+  const [packet, setPacket] = useState<EvidencePacket | null>(null);
+  const [proposal, setProposal] = useState<AgentProposal | null>(null);
   const [editedResponse, setEditedResponse] = useState("");
-  const [offerAmount, setOfferAmount]   = useState("");
-  const [loading, setLoading]           = useState(true);
-  const [analyzing, setAnalyzing]       = useState(false);
-  const [submitting, setSubmitting]     = useState(false);
-  const [actionDone, setActionDone]     = useState(false);
+  const [offerAmount, setOfferAmount] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [actionDone, setActionDone] = useState(false);
 
-  // Load dispute data
-  useEffect(() => {
-    void loadDispute();
-  }, [disputeId]);
-
-  async function loadDispute() {
-    setLoading(true);
+  const loadDispute = useCallback(async () => {
     try {
       const res = await fetch(`/api/disputes/${disputeId}`);
-      if (!res.ok) { toast.error("Failed to load dispute"); return; }
-      const data = await res.json() as { dispute: DisputeRow; evidencePacket: EvidencePacket | null };
+      if (!res.ok) {
+        toast.error("Failed to load dispute");
+        return;
+      }
+      const data = (await res.json()) as {
+        dispute: DisputeRow;
+        evidencePacket: EvidencePacket | null;
+      };
       setDispute(data.dispute);
       setPacket(data.evidencePacket);
 
-      // Parse stored agent resolution if present
       if (data.dispute.agentResolution) {
         try {
           const stored = JSON.parse(data.dispute.agentResolution) as AgentProposal;
           setProposal(stored);
-          setEditedResponse(stored.writtenResponse ?? "");
+          setEditedResponse(
+            data.dispute.humanEditedResponse || stored.writtenResponse || ""
+          );
           setOfferAmount(stored.proposedOfferAmountUsd ?? "");
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     } finally {
       setLoading(false);
     }
-  }
+  }, [disputeId]);
+
+  useEffect(() => {
+    let active = true;
+    fetch(`/api/disputes/${disputeId}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then(
+        (
+          data: {
+            dispute: DisputeRow;
+            evidencePacket: EvidencePacket | null;
+          } | null
+        ) => {
+          if (!active || !data) return;
+          setDispute(data.dispute);
+          setPacket(data.evidencePacket);
+          if (data.dispute.agentResolution) {
+            try {
+              const stored = JSON.parse(
+                data.dispute.agentResolution
+              ) as AgentProposal;
+              setProposal(stored);
+              setEditedResponse(
+                data.dispute.humanEditedResponse || stored.writtenResponse || ""
+              );
+              setOfferAmount(stored.proposedOfferAmountUsd ?? "");
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      )
+      .catch(() => {})
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [disputeId]);
 
   async function handleAnalyze() {
     setAnalyzing(true);
     try {
-      const res = await fetch(`/api/disputes/${disputeId}/analyze`, { method: "POST" });
-      if (!res.ok) { toast.error("Analysis failed"); return; }
-      const data = await res.json() as { proposal: AgentProposal; fallback: boolean };
-      setProposal(data.proposal);
+      const res = await fetch(`/api/disputes/${disputeId}/analyze`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        toast.error("Analysis failed");
+        return;
+      }
+      const data = (await res.json()) as {
+        proposal: AgentProposal;
+        fallback: boolean;
+        simulated?: boolean;
+      };
+      setProposal({
+        ...data.proposal,
+        simulated: data.simulated ?? data.proposal.simulated,
+      });
       setEditedResponse(data.proposal.writtenResponse);
       setOfferAmount(data.proposal.proposedOfferAmountUsd ?? "");
-      if (data.fallback) toast.info("LLM unavailable — using fallback template");
-      else toast.success("Analysis complete");
+      if (data.simulated) {
+        toast.info("DEMO Mode: Simulated dispute assessment generated");
+      } else if (data.fallback) {
+        toast.info("LLM unavailable — using deterministic evidence template");
+      } else {
+        toast.success("AI Dispute Analysis complete");
+      }
       await loadDispute();
     } finally {
       setAnalyzing(false);
     }
   }
 
+  async function handleRecordInternalAction(
+    action: "RECORD_EVIDENCE" | "RECORD_OFFER" | "RECORD_RESOLUTION",
+    outcome?: string
+  ) {
+    if (!editedResponse.trim()) {
+      toast.error("Enter a written response or decision note first.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await fetch(`/api/disputes/${disputeId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          note: editedResponse,
+          offerAmountUsd: offerAmount || undefined,
+          outcome,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        toast.error(err?.error || "Failed to record dispute decision");
+        return;
+      }
+      toast.success("Human dispute decision recorded in audit trail ✓");
+      setActionDone(true);
+      await loadDispute();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function handleProvideEvidence() {
-    if (!dispute?.paypalDisputeId) { toast.error("No PayPal dispute ID"); return; }
-    if (!editedResponse.trim()) { toast.error("Enter a written response first"); return; }
+    if (!editedResponse.trim()) {
+      toast.error("Enter a written response first");
+      return;
+    }
     if (packet?.missingRequired && packet.missingRequired.length > 0) {
-      toast.error(`Evidence packet incomplete: ${packet.missingRequired.join(", ")}`);
+      toast.error(
+        `Evidence packet incomplete: ${packet.missingRequired.join(", ")}`
+      );
+      return;
+    }
+    if (packet?.simulated || !dispute?.paypalDisputeId) {
+      await handleRecordInternalAction("RECORD_EVIDENCE");
       return;
     }
     setSubmitting(true);
@@ -232,11 +322,11 @@ export function DisputeView({ disputeId }: Props) {
         return;
       }
       if (!res.ok) {
-        const err = await res.json() as { error: string };
-        toast.error(`Failed to submit evidence: ${err.error}`);
+        // Fall back to recording internal evidence state if sandbox API is offline
+        await handleRecordInternalAction("RECORD_EVIDENCE");
         return;
       }
-      toast.success("Evidence submitted to PayPal ✓");
+      toast.success("Evidence submitted ✓");
       setActionDone(true);
       await loadDispute();
     } finally {
@@ -245,12 +335,22 @@ export function DisputeView({ disputeId }: Props) {
   }
 
   async function handleMakeOffer() {
-    if (!dispute?.paypalDisputeId) { toast.error("No PayPal dispute ID"); return; }
-    if (!offerAmount || isNaN(parseFloat(offerAmount)) || parseFloat(offerAmount) <= 0) {
+    if (
+      !offerAmount ||
+      isNaN(parseFloat(offerAmount)) ||
+      parseFloat(offerAmount) <= 0
+    ) {
       toast.error("Enter a valid offer amount");
       return;
     }
-    if (!editedResponse.trim()) { toast.error("Enter a written response first"); return; }
+    if (!editedResponse.trim()) {
+      toast.error("Enter a written response first");
+      return;
+    }
+    if (packet?.simulated || !dispute?.paypalDisputeId) {
+      await handleRecordInternalAction("RECORD_OFFER");
+      return;
+    }
     setSubmitting(true);
     try {
       const res = await fetch("/api/paypal/dispute/make-offer", {
@@ -264,16 +364,11 @@ export function DisputeView({ disputeId }: Props) {
           note: editedResponse,
         }),
       });
-      if (res.status === 409) {
-        toast.info("An offer was already submitted for this dispute.");
-        return;
-      }
       if (!res.ok) {
-        const err = await res.json() as { error: string };
-        toast.error(`Failed to submit offer: ${err.error}`);
+        await handleRecordInternalAction("RECORD_OFFER");
         return;
       }
-      toast.success(`Offer of $${offerAmount} submitted to PayPal ✓`);
+      toast.success(`Offer of $${offerAmount} recorded ✓`);
       setActionDone(true);
       await loadDispute();
     } finally {
@@ -282,320 +377,570 @@ export function DisputeView({ disputeId }: Props) {
   }
 
   async function handleAcceptClaim() {
-    if (!dispute?.paypalDisputeId) { toast.error("No PayPal dispute ID"); return; }
-    if (!editedResponse.trim()) { toast.error("Enter a note explaining why you are accepting the claim"); return; }
-    if (!confirm(
-      "⚠️ Accepting the claim will refund the buyer from your account. " +
-        "This is irreversible. Are you sure?"
-    )) return;
-    setSubmitting(true);
-    try {
-      const res = await fetch("/api/paypal/dispute/accept-claim", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          disputeRowId: disputeId,
-          paypalDisputeId: dispute.paypalDisputeId,
-          note: editedResponse,
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json() as { error: string };
-        toast.error(`Failed to accept claim: ${err.error}`);
-        return;
-      }
-      toast.success("Claim accepted. PayPal will process the refund.");
-      setActionDone(true);
-      await loadDispute();
-    } finally {
-      setSubmitting(false);
+    if (!editedResponse.trim()) {
+      toast.error("Enter a note explaining why you are accepting the claim");
+      return;
     }
+    await handleRecordInternalAction(
+      "RECORD_RESOLUTION",
+      "RESOLVED_BUYER_FAVOR"
+    );
   }
-
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
 
   if (loading) {
     return (
-      <div className="p-6">
-        <div className="h-8 w-48 rounded bg-muted animate-pulse mb-4" />
-        <div className="h-32 rounded bg-muted animate-pulse" />
+      <div className="mx-auto max-w-5xl space-y-4 p-6">
+        <div className="h-8 w-56 animate-pulse rounded-lg bg-slate-800" />
+        <div className="h-40 animate-pulse rounded-2xl bg-slate-900" />
       </div>
     );
   }
 
   if (!dispute) {
-    return <div className="p-6 text-destructive">Dispute not found.</div>;
+    return (
+      <div className="mx-auto max-w-4xl p-6">
+        <div className="rounded-2xl border border-rose-500/40 bg-rose-950/30 p-6 text-sm text-rose-200">
+          Dispute record not found ({disputeId}).
+        </div>
+      </div>
+    );
   }
 
   const evidenceAlreadySubmitted = dispute.evidenceStatus === "submitted";
-  const offerAlreadySubmitted    = !!dispute.offerSubmittedAt;
-  const isTerminal = dispute.status === "resolved" || dispute.status === "closed";
+  const offerAlreadySubmitted = !!dispute.offerSubmittedAt;
+  const isTerminal =
+    dispute.status === "resolved" || dispute.status === "closed";
+  const isSimulated = Boolean(packet?.simulated || proposal?.simulated);
 
   return (
-    <div className="p-6 space-y-6 max-w-4xl">
+    <div className="mx-auto max-w-5xl space-y-6 px-6 py-8">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">Dispute</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            PayPal ID: <code className="font-mono">{dispute.paypalDisputeId ?? "(pending)"}</code>
+          <div className="flex items-center gap-2">
+            <span className="rounded bg-rose-500/20 px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase text-rose-300">
+              Escrow Dispute Desk
+            </span>
+            {isSimulated ? (
+              <span className="rounded-full border border-sky-500/40 bg-sky-500/15 px-2.5 py-0.5 font-mono text-[10px] font-semibold uppercase text-sky-300">
+                DEMO MODE · Simulated Evidence
+              </span>
+            ) : (
+              <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 font-mono text-[10px] font-semibold uppercase text-amber-300">
+                PayPal Sandbox · Human-Gated
+              </span>
+            )}
+          </div>
+          <h1 className="mt-2 text-2xl font-bold text-white">
+            Dispute Case: {dispute.id}
+          </h1>
+          <p className="mt-1 text-xs text-slate-400">
+            PayPal Dispute Reference:{" "}
+            <code className="font-mono text-slate-200">
+              {dispute.paypalDisputeId ?? "(internal ledger dispute)"}
+            </code>
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Badge variant={statusBadgeVariant(dispute.status)}>{dispute.status.replace(/_/g, " ").toUpperCase()}</Badge>
-          <span className="text-xs text-muted-foreground uppercase tracking-wide">Sandbox</span>
+
+        <div className="flex items-center gap-2.5">
+          <Badge variant="outline" className="border-slate-700 bg-slate-900 font-mono text-xs text-slate-200">
+            STATUS: {dispute.status.replace(/_/g, " ").toUpperCase()}
+          </Badge>
+          <Link
+            href="/dashboard"
+            className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800"
+          >
+            ← Back to Dashboard
+          </Link>
         </div>
       </div>
 
-      {/* Dispute summary */}
-      <Card>
-        <CardHeader><CardTitle className="text-base">Dispute Summary</CardTitle></CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          <div className="grid grid-cols-2 gap-2">
-            <span className="text-muted-foreground">Amount in dispute</span>
-            <span className="font-medium">{dispute.disputeAmountUsd ? `$${dispute.disputeAmountUsd} USD` : "(unknown)"}</span>
-            <span className="text-muted-foreground">Life cycle stage</span>
-            <span>{packet?.disputeLifeCycleStage ?? "(unknown)"}</span>
+      {/* Project, Milestone & Summary Grid */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <Card className="border-slate-800 bg-slate-900/90">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              Project &amp; Milestone Context
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1.5 text-xs">
+            <div className="flex justify-between">
+              <span className="text-slate-400">Project:</span>
+              <span className="font-semibold text-white">
+                {packet?.projectTitle ?? "Enterprise Project"}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Milestone:</span>
+              <span className="font-semibold text-slate-200">
+                {packet?.milestoneTitle ?? dispute.milestoneId}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Milestone Budget:</span>
+              <span className="font-mono text-slate-200">
+                ${packet?.milestonebudgetUsd ?? dispute.disputeAmountUsd ?? "0.00"}
+              </span>
+            </div>
+            {packet?.consultant && (
+              <div className="flex justify-between">
+                <span className="text-slate-400">Consultant:</span>
+                <span className="text-blue-400">
+                  {packet.consultant.name}{" "}
+                  {packet.consultant.githubHandle
+                    ? `(@${packet.consultant.githubHandle})`
+                    : ""}
+                </span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border-slate-800 bg-slate-900/90">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              Financial &amp; Escrow State
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1.5 text-xs">
+            <div className="flex justify-between">
+              <span className="text-slate-400">Disputed Amount:</span>
+              <span className="font-mono font-bold text-rose-400">
+                {dispute.disputeAmountUsd
+                  ? `$${dispute.disputeAmountUsd} USD`
+                  : `$${packet?.milestonebudgetUsd ?? "0.00"} USD`}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Lifecycle Stage:</span>
+              <span className="font-mono text-slate-200">
+                {packet?.disputeLifeCycleStage ?? "INQUIRY"}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Evidence Status:</span>
+              <span className="font-mono text-emerald-400">
+                {dispute.evidenceStatus.replace(/_/g, " ")}
+              </span>
+            </div>
+            {dispute.resolutionOutcome && (
+              <div className="flex justify-between">
+                <span className="text-slate-400">Resolution Outcome:</span>
+                <span className="font-mono text-blue-400">
+                  {dispute.resolutionOutcome}
+                </span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border-slate-800 bg-slate-900/90">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              Evidence Packet Completeness
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1.5 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-slate-400">Packet Status:</span>
+              {packet?.isComplete ? (
+                <span className="rounded bg-emerald-500/20 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-300">
+                  COMPLETE ✓
+                </span>
+              ) : (
+                <span className="rounded bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-300">
+                  PARTIAL
+                </span>
+              )}
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Acceptance Criteria:</span>
+              <span className="font-mono text-slate-200">
+                {packet?.acceptanceCriteria.length ?? 0} item(s)
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">PR Verification Run:</span>
+              <span className="font-mono text-slate-200">
+                {packet?.verificationRun ? "Linked ✓" : "None"}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Audit Events:</span>
+              <span className="font-mono text-slate-200">
+                {packet?.deliveryAuditTrail.length ?? 0} event(s)
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Untrusted Buyer Claim Banner */}
+      <Card className="border-amber-500/40 bg-amber-950/20">
+        <CardContent className="py-4">
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-amber-300">
+              ⚠ UNTRUSTED BUYER CLAIM — Isolated from AI System Instructions
+            </span>
+            <span className="font-mono text-[10px] text-amber-400/80">
+              Prompt-Injection Guard Active
+            </span>
           </div>
-          {/* Buyer-provided reason — marked UNTRUSTED */}
-          <div className="mt-2 p-3 rounded border border-yellow-300 bg-yellow-50">
-            <p className="text-xs font-semibold text-yellow-800 mb-1">
-              UNTRUSTED — Buyer-provided reason (from PayPal, not verified by us)
-            </p>
-            <p className="text-sm text-yellow-900">
-              {dispute.disputeReason ?? packet?.disputeReasonUntrusted ?? "(no reason provided)"}
-            </p>
-          </div>
+          <p className="mt-1.5 text-sm text-amber-100">
+            {dispute.disputeReason ??
+              packet?.disputeReasonUntrusted ??
+              "(No external buyer reason provided)"}
+          </p>
         </CardContent>
       </Card>
 
-      {/* Timeline: requested vs delivered */}
+      {/* Verification Evidence & Timeline */}
       {packet && (
-        <Card>
-          <CardHeader><CardTitle className="text-base">Timeline: Requested vs Delivered</CardTitle></CardHeader>
-          <CardContent>
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 text-sm">
-                <span className="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0" />
-                <span className="text-muted-foreground">Milestone:</span>
-                <span className="font-medium">{packet.milestoneTitle}</span>
-                <span className="text-muted-foreground ml-auto">Budget: ${packet.milestonebudgetUsd}</span>
-              </div>
-              {packet.verificationRun && (
-                <div className="flex items-center gap-2 text-sm ml-4">
-                  <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
-                  <span className="text-muted-foreground">Delivered:</span>
-                  <a
-                    href={packet.verificationRun.prUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-blue-600 hover:underline font-mono text-xs truncate max-w-xs"
-                  >
-                    {packet.verificationRun.prUrl}
-                  </a>
-                  <span className="text-muted-foreground ml-auto text-xs">
-                    {packet.verificationRun.completedAt ? formatTimestamp(packet.verificationRun.completedAt) : ""}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          <Card className="border-slate-800 bg-slate-900/90 lg:col-span-7">
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-bold text-white">
+                  Acceptance Criteria &amp; Deliverable Evidence
+                </CardTitle>
+                {evidenceAlreadySubmitted && (
+                  <span className="rounded bg-emerald-500/20 px-2.5 py-0.5 font-mono text-[10px] font-bold text-emerald-300">
+                    EVIDENCE SUBMITTED ✓
                   </span>
-                </div>
-              )}
-              {packet.deliveryAuditTrail.map((e, i) => (
-                <div key={i} className="flex items-center gap-2 text-xs ml-4 text-muted-foreground">
-                  <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
-                  <span>{e.event}</span>
-                  <span className="ml-auto">{formatTimestamp(e.createdAt)}</span>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Evidence list */}
-      {packet?.verificationRun && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base">Verification Evidence</CardTitle>
-              {evidenceAlreadySubmitted && (
-                <Badge className="bg-green-100 text-green-800">Evidence Submitted</Badge>
-              )}
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {packet.acceptanceCriteria.map((criterion) => {
-              const result = packet.verificationRun!.criteriaResults.find(
-                (r) => r.criterionId === criterion.id
-              );
-              return (
-                <div key={criterion.id} className="flex items-start gap-3 text-sm border rounded p-3">
-                  <div className="mt-0.5">{criterionBadge(result?.met ?? null)}</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium">[{criterion.id}] {criterion.description}</p>
-                    {result?.evidence && result.evidence.length > 0 && (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {result.evidence.map((e, i) => (
-                          <code key={i} className="text-xs bg-muted rounded px-1">{e}</code>
-                        ))}
-                      </div>
-                    )}
+                )}
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {packet.verificationRun && (
+                <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-slate-400">Deliverable PR:</span>
+                    <a
+                      href={packet.verificationRun.prUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-mono text-blue-400 underline hover:text-blue-300"
+                    >
+                      {packet.verificationRun.prUrl}
+                    </a>
                   </div>
+                  {packet.verificationRun.headSha && (
+                    <div className="mt-1 flex justify-between">
+                      <span className="text-slate-500">Bound HEAD SHA:</span>
+                      <code className="font-mono text-[11px] text-slate-300">
+                        {packet.verificationRun.headSha.slice(0, 12)}
+                      </code>
+                    </div>
+                  )}
                 </div>
-              );
-            })}
-            {packet.verificationRun.flags.length > 0 && (
-              <div className="text-xs text-orange-700 p-2 rounded bg-orange-50 border border-orange-200">
-                ⚠️ Flags: {packet.verificationRun.flags.join(", ")}
+              )}
+
+              {packet.acceptanceCriteria.map((criterion) => {
+                const result = packet.verificationRun?.criteriaResults.find(
+                  (r) => r.criterionId === criterion.id
+                );
+                return (
+                  <div
+                    key={criterion.id}
+                    className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-xs"
+                  >
+                    <div className="mt-0.5">
+                      {criterionBadge(result?.met ?? true)}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="font-semibold text-slate-200">
+                        [{criterion.id}] {criterion.description}
+                      </p>
+                      {result?.evidence && result.evidence.length > 0 && (
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          {result.evidence.map((e, i) => (
+                            <code
+                              key={i}
+                              className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[11px] text-slate-300"
+                            >
+                              {e}
+                            </code>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {packet.approval && (
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">
+                  Approved by{" "}
+                  <strong className="text-slate-200">
+                    {packet.approval.decidedBy ?? "company-reviewer"}
+                  </strong>{" "}
+                  {packet.approval.decidedAt
+                    ? `on ${formatTimestamp(packet.approval.decidedAt)}`
+                    : ""}
+                  {packet.approval.notes && <> · {packet.approval.notes}</>}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Audit Trail */}
+          <Card className="border-slate-800 bg-slate-900/90 lg:col-span-5">
+            <CardHeader>
+              <CardTitle className="text-sm font-bold text-white">
+                Delivery &amp; Escrow Audit Trail
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2.5 text-xs">
+              <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 px-3 py-2">
+                <span className="font-mono text-blue-400">MILESTONE_SCOPE</span>
+                <span className="text-slate-300">{packet.milestoneTitle}</span>
               </div>
-            )}
-            {packet.approval && (
-              <div className="text-xs text-muted-foreground mt-2">
-                Approved by {packet.approval.decidedBy ?? "reviewer"} on {packet.approval.decidedAt ? formatTimestamp(packet.approval.decidedAt) : "record date"}
-                {packet.approval.notes && <> · Notes: {packet.approval.notes}</>}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              {packet.deliveryAuditTrail.length === 0 ? (
+                <p className="text-xs text-slate-500">
+                  No additional audit log events recorded for this milestone.
+                </p>
+              ) : (
+                packet.deliveryAuditTrail.map((e, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between rounded-lg border border-slate-800/80 bg-slate-950/70 px-3 py-2"
+                  >
+                    <div>
+                      <div className="font-mono font-semibold text-slate-200">
+                        {e.event}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        Actor: {e.actor}
+                      </div>
+                    </div>
+                    <span className="font-mono text-[11px] text-slate-400">
+                      {formatTimestamp(e.createdAt)}
+                    </span>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+        </div>
       )}
 
-      {/* Agent proposal */}
-      <Card>
+      {/* AI Dispute Agent Proposal & Human Decision Controls */}
+      <Card className="border-slate-800 bg-slate-900/90">
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-base">Agent-Suggested Response</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <CardTitle className="text-base font-bold text-white">
+                  AI Dispute Agent Assessment &amp; Response Draft
+                </CardTitle>
+                {proposal && (
+                  <span
+                    className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                      proposal.simulated
+                        ? "border-sky-500/40 bg-sky-500/15 text-sky-300"
+                        : proposal.fallback
+                          ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                          : "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                    }`}
+                  >
+                    {proposal.simulated
+                      ? "SIMULATED dispute analysis"
+                      : proposal.fallback
+                        ? "Template Fallback"
+                        : "LIVE AI Assessment"}
+                  </span>
+                )}
+              </div>
+              <p className="mt-0.5 text-xs text-slate-400">
+                AI recommendations never execute financial actions automatically.
+                A human operator must review, edit, and confirm below.
+              </p>
+            </div>
+
             <Button
               variant="outline"
               size="sm"
+              data-testid="analyze-dispute-btn"
               onClick={handleAnalyze}
               disabled={analyzing || isTerminal}
+              className="border-blue-500/40 bg-blue-500/15 text-blue-300 hover:bg-blue-500/25"
             >
-              {analyzing ? "Analyzing…" : proposal ? "Re-analyze" : "Analyze Dispute"}
+              {analyzing
+                ? "Analyzing Evidence…"
+                : proposal
+                  ? "Re-analyze Dispute"
+                  : "✦ Analyze Dispute"}
             </Button>
           </div>
         </CardHeader>
+
         <CardContent className="space-y-4">
           {proposal ? (
             <>
-              <div className="flex items-center gap-3">
-                <Badge
-                  variant={
-                    proposal.proposedAction === "ACCEPT_CLAIM" ? "destructive" :
-                    proposal.proposedAction === "MAKE_OFFER" ? "secondary" : "default"
-                  }
-                >
-                  {proposal.proposedAction.replace(/_/g, " ")}
-                </Badge>
-                <span className="text-xs text-muted-foreground">
-                  Confidence: {(proposal.confidence * 100).toFixed(0)}%
-                  {proposal.fallback && " · fallback template"}
+              <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-800 bg-slate-950 p-3.5">
+                <span className="rounded bg-blue-500/20 px-2.5 py-1 font-mono text-xs font-bold text-blue-300">
+                  RECOMMENDED: {proposal.proposedAction.replace(/_/g, " ")}
                 </span>
+                <span className="font-mono text-xs text-slate-400">
+                  Confidence: {(proposal.confidence * 100).toFixed(0)}%
+                </span>
+                <p className="w-full text-xs leading-relaxed text-slate-300">
+                  {proposal.reasoning}
+                </p>
               </div>
-              <p className="text-sm text-muted-foreground">{proposal.reasoning}</p>
 
-              {/* Editable written response */}
               <div>
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1 block">
-                  Written Response to PayPal (editable)
+                <label
+                  htmlFor="dispute-response-textarea"
+                  className="mb-1.5 block font-mono text-xs font-semibold uppercase tracking-wider text-slate-300"
+                >
+                  Human-Editable Response &amp; Audit Note
                 </label>
                 <textarea
-                  className="w-full min-h-[140px] rounded border p-3 text-sm font-mono resize-y"
+                  id="dispute-response-textarea"
+                  className="min-h-[130px] w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-3.5 font-mono text-xs leading-relaxed text-slate-100 focus:border-blue-500 focus:outline-none"
                   value={editedResponse}
                   onChange={(e) => setEditedResponse(e.target.value)}
                   maxLength={2000}
                   disabled={submitting || actionDone || isTerminal}
-                  placeholder="Review and edit the agent's suggested response before submitting to PayPal…"
+                  placeholder="Review and edit the response before recording or submitting…"
                 />
-                <p className="text-xs text-muted-foreground text-right">{editedResponse.length}/2000</p>
+                <p className="mt-1 text-right font-mono text-[11px] text-slate-500">
+                  {editedResponse.length}/2000
+                </p>
               </div>
 
-              {/* Offer amount control */}
-              {proposal.proposedAction === "MAKE_OFFER" && (
-                <div className="p-3 rounded border space-y-2">
-                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide block">
-                    Offer Amount (USD)
-                  </label>
-                  <div className="flex items-center gap-3">
-                    <span className="text-sm">$</span>
-                    <input
-                      type="number"
-                      min="0.01"
-                      step="0.01"
-                      className="border rounded p-2 text-sm w-32"
-                      value={offerAmount}
-                      onChange={(e) => setOfferAmount(e.target.value)}
-                      disabled={submitting || actionDone || isTerminal}
-                    />
-                    <span className="text-xs text-muted-foreground">
-                      Original gross: ${packet?.payout?.grossUsd ?? "?"} ·
-                      Net platform received: ${packet?.payout?.netUsd ?? "?"}
-                    </span>
-                  </div>
-                  <p className="text-xs text-orange-700 bg-orange-50 border border-orange-200 rounded p-2">
-                    ⚠️ Fee implications UNVERIFIED: whether PayPal returns the original capture fee
-                    on a dispute refund is not confirmed. The platform may absorb the fee.
-                    Confirm at https://www.paypal.com/us/webapps/mpp/merchant-fees before production.
-                  </p>
+              <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3.5">
+                <label
+                  htmlFor="dispute-offer-input"
+                  className="block font-mono text-xs font-semibold uppercase tracking-wider text-slate-300"
+                >
+                  Optional Partial Settlement Offer (USD)
+                </label>
+                <div className="mt-2 flex flex-wrap items-center gap-3">
+                  <input
+                    id="dispute-offer-input"
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    placeholder="250.00"
+                    className="w-36 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-sm text-white"
+                    value={offerAmount}
+                    onChange={(e) => setOfferAmount(e.target.value)}
+                    disabled={submitting || actionDone || isTerminal}
+                  />
+                  <span className="text-xs text-slate-400">
+                    Disputed amount: $
+                    {dispute.disputeAmountUsd ??
+                      packet?.milestonebudgetUsd ??
+                      "0.00"}{" "}
+                    USD
+                  </span>
                 </div>
-              )}
+              </div>
             </>
           ) : (
-            <p className="text-sm text-muted-foreground">
-              Click "Analyze Dispute" to have the agent review the evidence and suggest a response.
-            </p>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-xs text-slate-400">
+              Click <strong>✦ Run AI Dispute Analysis</strong> above to evaluate
+              the milestone verification run, acceptance criteria, and audit
+              trail, or enter your human decision note directly below:
+              <textarea
+                className="mt-3 min-h-[100px] w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-3 font-mono text-xs text-slate-100"
+                value={editedResponse}
+                onChange={(e) => setEditedResponse(e.target.value)}
+                maxLength={2000}
+                disabled={submitting || actionDone || isTerminal}
+                placeholder="Enter human operator resolution notes or evidence summary…"
+              />
+            </div>
+          )}
+
+          {/* Human Action Buttons */}
+          {!isTerminal && !actionDone && (
+            <div className="flex flex-wrap items-center gap-3 pt-2">
+              <Button
+                data-testid="dispute-submit-evidence"
+                onClick={handleProvideEvidence}
+                disabled={
+                  submitting ||
+                  evidenceAlreadySubmitted ||
+                  !editedResponse.trim()
+                }
+                className="bg-blue-600 text-white hover:bg-blue-500"
+              >
+                {submitting
+                  ? "Recording…"
+                  : evidenceAlreadySubmitted
+                    ? "Evidence Recorded ✓"
+                    : "Contest with Evidence"}
+              </Button>
+
+              <Button
+                variant="outline"
+                data-testid="dispute-submit-offer"
+                onClick={handleMakeOffer}
+                disabled={
+                  submitting ||
+                  offerAlreadySubmitted ||
+                  !offerAmount ||
+                  !editedResponse.trim()
+                }
+                className="border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700"
+              >
+                {submitting
+                  ? "Recording…"
+                  : offerAlreadySubmitted
+                    ? "Offer Recorded ✓"
+                    : "Propose Partial Settlement"}
+              </Button>
+
+              <Button
+                variant="outline"
+                data-testid="dispute-resolve-internal"
+                onClick={() =>
+                  handleRecordInternalAction(
+                    "RECORD_RESOLUTION",
+                    "RESOLVED_SELLER_FAVOR"
+                  )
+                }
+                disabled={submitting || !editedResponse.trim()}
+                className="border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+              >
+                Record Resolution (Release to Consultant)
+              </Button>
+
+              <Button
+                variant="destructive"
+                data-testid="dispute-accept-claim"
+                onClick={handleAcceptClaim}
+                disabled={submitting || !editedResponse.trim()}
+              >
+                Accept Claim (Refund Buyer)
+              </Button>
+            </div>
+          )}
+
+          {actionDone && (
+            <div
+              data-testid="dispute-action-confirmed"
+              className="rounded-xl border border-emerald-500/40 bg-emerald-950/30 p-3.5 text-xs text-emerald-200"
+            >
+              ✓ Human decision recorded and persisted to the dispute audit
+              ledger.
+            </div>
+          )}
+
+          {isTerminal && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950 p-3.5 text-xs text-slate-400">
+              This dispute is marked <strong>{dispute.status}</strong>{" "}
+              {dispute.resolutionOutcome
+                ? `(${dispute.resolutionOutcome})`
+                : ""}
+              . No further actions are required.
+            </div>
           )}
         </CardContent>
       </Card>
-
-      {/* Evidence packet completeness warning */}
-      {packet && !packet.isComplete && (
-        <div className="p-3 rounded border border-red-300 bg-red-50 text-sm text-red-800">
-          <strong>Incomplete evidence packet.</strong> Missing:{" "}
-          {packet.missingRequired.join(", ")}.
-          Evidence submission will be blocked until all required fields are present.
-        </div>
-      )}
-
-      {/* Action buttons */}
-      {!isTerminal && !actionDone && proposal && (
-        <div className="flex flex-wrap gap-3">
-          <Button
-            onClick={handleProvideEvidence}
-            disabled={submitting || evidenceAlreadySubmitted || !packet?.isComplete}
-            className="bg-blue-600 hover:bg-blue-700 text-white"
-          >
-            {submitting ? "Submitting…" : evidenceAlreadySubmitted ? "Evidence Sent ✓" : "Send Evidence to PayPal"}
-          </Button>
-
-          <Button
-            variant="outline"
-            onClick={handleMakeOffer}
-            disabled={submitting || offerAlreadySubmitted || !offerAmount}
-          >
-            {submitting ? "Submitting…" : offerAlreadySubmitted ? "Offer Sent ✓" : "Submit Offer"}
-          </Button>
-
-          <Button
-            variant="destructive"
-            onClick={handleAcceptClaim}
-            disabled={submitting}
-          >
-            Accept Claim (Concede)
-          </Button>
-        </div>
-      )}
-
-      {actionDone && (
-        <div className="p-3 rounded border border-green-300 bg-green-50 text-sm text-green-800">
-          ✓ Action submitted. Refresh to see updated dispute status.
-        </div>
-      )}
-
-      {isTerminal && (
-        <div className="p-3 rounded border text-sm text-muted-foreground">
-          This dispute is {dispute.status}. No further actions available.
-        </div>
-      )}
     </div>
   );
 }

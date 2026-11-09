@@ -7,28 +7,45 @@
  *   Tests the /api/projects/[id]/milestones/reorder route directly via HTTP POST.
  *   UI interaction is best-effort (Bryntum fixme).
  *
- * Data: a beforeAll hook seeds one project + two milestones (one planned, one funded)
- *   directly into the test DB via the Neon HTTP API, then removes them in afterAll.
- *   This makes tests deterministic without relying on .env.test seed IDs.
+ * Data: a beforeAll hook seeds one company + user + session + project + two
+ *   milestones (one planned, one funded) directly into the test DB via the
+ *   Neon HTTP API, then removes them in afterAll. This makes tests
+ *   deterministic without relying on .env.test seed IDs. Requires migration
+ *   0010 (`users` + `auth_sessions`) applied to the isolated TEST_DATABASE_URL.
  *
- * Auth: HS256 JWT cookie signed with ROLE_COOKIE_SECRET — no browser login required.
+ * Auth (D.3): live mode requires a verified company session — a bare role
+ *   JWT authorizes nothing. The suite mints a session JWT (same HS256 claims
+ *   as lib/auth/session.ts) matching the seeded `auth_sessions` row, signed
+ *   with SESSION_COOKIE_SECRET (or the ROLE_COOKIE_SECRET fallback, mirroring
+ *   the server's resolution) — no browser login required.
  */
 
 import { test, expect } from "@playwright/test";
 import * as crypto from "crypto";
 import { neon } from "@neondatabase/serverless";
 
-// ── Auth helper ────────────────────────────────────────────────────────────────
+// ── Auth helper: mint the session JWT matching the seeded auth_sessions row ──
 
-async function makeCompanyCookieValue(): Promise<string> {
-  const secret = process.env.ROLE_COOKIE_SECRET;
+async function makeSessionCookieValue(): Promise<string> {
+  const secret = process.env.SESSION_COOKIE_SECRET || process.env.ROLE_COOKIE_SECRET;
   if (!secret || secret.length < 32) {
-    throw new Error("ROLE_COOKIE_SECRET must be set (≥32 chars) in .env.test");
+    throw new Error("SESSION_COOKIE_SECRET (or ROLE_COOKIE_SECRET fallback, ≥32 chars) must be set in .env.test");
   }
   const header  = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
   const now     = Math.floor(Date.now() / 1000);
   const payload = Buffer.from(
-    JSON.stringify({ role: "company", iat: now, exp: now + 86400 })
+    JSON.stringify({
+      sub: E2E_USER_ID,
+      jti: E2E_SESSION_ID,
+      email: E2E_USER_EMAIL,
+      name: "E2E Gantt User",
+      role: "company",
+      companyId: E2E_COMPANY_ID,
+      companyName: "E2E Gantt Test Co",
+      githubHandle: null,
+      iat: now,
+      exp: now + 86400,
+    })
   ).toString("base64url");
   const sigInput = `${header}.${payload}`;
   const key = await crypto.subtle.importKey(
@@ -41,7 +58,7 @@ async function makeCompanyCookieValue(): Promise<string> {
 
 async function companyHeaders(): Promise<Record<string, string>> {
   return {
-    "Cookie": `consultai_role_v1=${await makeCompanyCookieValue()}`,
+    "Cookie": `consultai_session_v1=${await makeSessionCookieValue()}`,
     "Content-Type": "application/json",
   };
 }
@@ -50,6 +67,9 @@ async function companyHeaders(): Promise<Record<string, string>> {
 
 const E2E_PROJECT_ID  = "e2e-gantt-project-001";
 const E2E_COMPANY_ID  = "e2e-gantt-company-001";
+const E2E_USER_ID     = "e2e-gantt-user-001";
+const E2E_SESSION_ID  = "e2e-gantt-session-001";
+const E2E_USER_EMAIL  = "e2e-gantt@test.local";
 const E2E_PLANNED_ID  = "e2e-gantt-milestone-planned";
 const E2E_FUNDED_ID   = "e2e-gantt-milestone-funded";
 
@@ -68,6 +88,22 @@ test.beforeAll(async () => {
   await sql`
     INSERT INTO companies (id, name, email, created_at)
     VALUES (${E2E_COMPANY_ID}, 'E2E Gantt Test Co', 'e2e-gantt@test.local', now())
+    ON CONFLICT (id) DO NOTHING
+  `;
+
+  // Seed user (owns the company; password hash is a dummy — auth here uses
+  // the seeded session row + minted JWT, never a password check)
+  await sql`
+    INSERT INTO users (id, email, name, password_hash, role, company_id, created_at, updated_at)
+    VALUES (${E2E_USER_ID}, ${E2E_USER_EMAIL}, 'E2E Gantt User', 'e2e-dummy-hash', 'company', ${E2E_COMPANY_ID}, now(), now())
+    ON CONFLICT (id) DO NOTHING
+  `;
+
+  // Seed session row (strict live mode validates the JWT against this row:
+  // must exist, be unrevoked, and unexpired)
+  await sql`
+    INSERT INTO auth_sessions (id, user_id, token_hash, role, company_id, expires_at, created_at)
+    VALUES (${E2E_SESSION_ID}, ${E2E_USER_ID}, 'e2e-gantt-tokenhash-001', 'company', ${E2E_COMPANY_ID}, now() + interval '7 days', now())
     ON CONFLICT (id) DO NOTHING
   `;
 
@@ -112,6 +148,8 @@ test.afterAll(async () => {
   // to delete audit entries. Test entries will remain in the table, which is fine.
   await sql`DELETE FROM milestones WHERE project_id = ${E2E_PROJECT_ID}`;
   await sql`DELETE FROM projects   WHERE id = ${E2E_PROJECT_ID}`;
+  await sql`DELETE FROM auth_sessions WHERE id = ${E2E_SESSION_ID}`;
+  await sql`DELETE FROM users      WHERE id = ${E2E_USER_ID}`;
   await sql`DELETE FROM companies  WHERE id = ${E2E_COMPANY_ID}`;
 });
 
@@ -258,9 +296,9 @@ test.describe("Gantt reorder — server action", () => {
   });
 
   test("Best-effort UI: milestones page renders without crash", async ({ page }) => {
-    const token = await makeCompanyCookieValue();
+    const token = await makeSessionCookieValue();
     await page.context().addCookies([
-      { name: "consultai_role_v1", value: token, domain: "localhost", path: "/" },
+      { name: "consultai_session_v1", value: token, domain: "localhost", path: "/" },
     ]);
 
     const res = await page.goto(

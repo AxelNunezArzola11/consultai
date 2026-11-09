@@ -56,6 +56,36 @@ export interface OperationsDataset {
   disputesCount?: number;
 }
 
+function emptyDataset(): OperationsDataset {
+  return {
+    consultants: [],
+    projects: [],
+    tasks: [],
+    companies: [],
+    contracts: [],
+    payments: [],
+    executions: [],
+  };
+}
+
+/** Merge one tab payload (`GET /api/operations/data?tab=`) into the dataset. */
+function mergeTabPayload(
+  prev: OperationsDataset | null,
+  tab: OperationsGridTab,
+  json: unknown
+): OperationsDataset {
+  const payload = (json ?? {}) as Partial<OperationsDataset> & {
+    disputesCount?: number;
+  };
+  const rows = Array.isArray(payload[tab])
+    ? (payload[tab] as Array<Record<string, unknown>>)
+    : [];
+  const next: OperationsDataset = { ...emptyDataset(), ...(prev ?? {}) };
+  next[tab] = rows;
+  next.disputesCount = payload.disputesCount ?? prev?.disputesCount;
+  return next;
+}
+
 const darkGridTheme = themeQuartz.withParams({
   backgroundColor: "#090d16",
   foregroundColor: "#e2e8f0",
@@ -93,7 +123,7 @@ const BADGE_PALETTE: Record<string, { bg: string; border: string; text: string }
   pending_approval: { bg: "rgba(245,158,11,0.14)", border: "rgba(245,158,11,0.4)", text: "#fbbf24" },
   awaiting_human_approval: { bg: "rgba(245,158,11,0.14)", border: "rgba(245,158,11,0.4)", text: "#fbbf24" },
   on_hold: { bg: "rgba(245,158,11,0.14)", border: "rgba(245,158,11,0.4)", text: "#fbbf24" },
-  verifying: { bg: "rgba(168,85,247,0.15)", border: "rgba(168,85,247,0.4)", text: "#c084fc" },
+  verifying: { bg: "rgba(6,182,212,0.15)", border: "rgba(6,182,212,0.4)", text: "#22d3ee" },
   running: { bg: "rgba(59,130,246,0.15)", border: "rgba(59,130,246,0.4)", text: "#60a5fa" },
   failed: { bg: "rgba(239,68,68,0.14)", border: "rgba(239,68,68,0.4)", text: "#f87171" },
   rejected: { bg: "rgba(239,68,68,0.14)", border: "rgba(239,68,68,0.4)", text: "#f87171" },
@@ -270,12 +300,11 @@ function getColumnDefsForTab(
     return wrapVisibility([
       selectionCol,
       { field: "candidateName", headerName: "Consultant", minWidth: 165, flex: 1, filter: "agTextColumnFilter" },
-      { field: "candidateEmail", headerName: "Email", minWidth: 180, flex: 1, filter: "agTextColumnFilter" },
       { field: "projectTitle", headerName: "Project", minWidth: 170, flex: 1, filter: "agTextColumnFilter" },
       { field: "templateVersion", headerName: "Agreement Type", width: 150, filter: "agTextColumnFilter" },
       { field: "status", headerName: "NDA Status", width: 135, filter: "agTextColumnFilter", cellRenderer: StatusBadgeRenderer },
       { field: "acceptedName", headerName: "Signed By", width: 145, filter: "agTextColumnFilter" },
-      { field: "documentHash", headerName: "SHA-256 Document Hash", width: 190, filter: "agTextColumnFilter" },
+      { field: "documentHash", headerName: "Document Hash (redacted)", width: 190, filter: "agTextColumnFilter" },
       { field: "meetingStatus", headerName: "Meeting Status", width: 140, filter: "agTextColumnFilter", cellRenderer: StatusBadgeRenderer },
     ]);
   }
@@ -310,6 +339,51 @@ function getColumnDefsForTab(
   ]);
 }
 
+// ── Master/Detail allowlist ────────────────────────────────────────────────────
+// Column hide is UX-only; the drawer must not expose hidden or sensitive
+// fields (emails, PayPal ids, hashes). Only listed keys render per tab.
+const DETAIL_ALLOWLIST: Record<OperationsGridTab, Set<string>> = {
+  tasks: new Set([
+    "id", "wbsCode", "title", "projectTitle", "status", "startDate",
+    "dueDate", "dependsOnTitle", "percentDone", "budgetUsd", "version",
+  ]),
+  consultants: new Set([
+    "id", "rank", "name", "githubHandle", "projectTitle",
+    "trustScore", "status", "verifiedSkillsCount", "gapsCount",
+  ]),
+  projects: new Set([
+    "id", "title", "companyName", "status", "milestoneCount",
+    "candidateCount", "totalBudgetUsd", "fundedUsd", "paidUsd",
+    "autoApproveThresholdUsd",
+  ]),
+  companies: new Set([
+    "id", "name", "projectCount", "activeProjectCount",
+    "totalContractedUsd", "createdAt",
+  ]),
+  contracts: new Set([
+    "id", "candidateName", "projectTitle", "templateVersion",
+    "status", "acceptedName", "meetingStatus",
+  ]),
+  payments: new Set([
+    "id", "milestoneTitle", "projectTitle", "status",
+    "approvalStatus", "grossUsd", "feeUsd", "netUsd",
+  ]),
+  executions: new Set([
+    "id", "intent", "delegatedAgents", "status", "approvalStatus",
+    "durationMs", "totalTokens", "requestedBy", "finalResult",
+  ]),
+};
+
+function detailEntries(
+  row: Record<string, unknown>,
+  tab: OperationsGridTab
+): Array<[string, unknown]> {
+  const allowed = DETAIL_ALLOWLIST[tab];
+  return Object.entries(row).filter(
+    ([k, v]) => allowed.has(k) && v !== null && v !== undefined
+  );
+}
+
 export default function EnterpriseOperationsGrids({
   initialTab = "tasks",
   initialData,
@@ -332,28 +406,62 @@ export default function EnterpriseOperationsGrids({
   const [detailRow, setDetailRow] = useState<Record<string, unknown> | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  const fetchOperationsData = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/operations/data", { cache: "no-store" });
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json.error ?? "Failed to load enterprise operations dataset.");
+  const fetchOperationsData = useCallback(
+    async (tab: OperationsGridTab = activeTab) => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(`/api/operations/data?tab=${tab}`, {
+          cache: "no-store",
+        });
+        const json = await res.json();
+        if (!res.ok) {
+          throw new Error(
+            (json as { error?: string }).error ??
+              "Failed to load enterprise operations dataset."
+          );
+        }
+        setDataset((prev) => mergeTabPayload(prev, tab, json));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load data.");
+      } finally {
+        setIsLoading(false);
       }
-      setDataset(json);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load data.");
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+    },
+    [activeTab]
+  );
 
   useEffect(() => {
-    if (!initialData) {
-      void fetchOperationsData();
-    }
-  }, [initialData, fetchOperationsData]);
+    if (initialData) return;
+    let active = true;
+    fetch(`/api/operations/data?tab=${activeTab}`, { cache: "no-store" })
+      .then(async (res) => {
+        const json = await res.json();
+        if (!res.ok) {
+          throw new Error(
+            (json as { error?: string }).error ??
+              "Failed to load enterprise operations dataset."
+          );
+        }
+        if (active) {
+          setDataset((prev) => mergeTabPayload(prev, activeTab, json));
+          setError(null);
+        }
+      })
+      .catch((err: unknown) => {
+        if (active) {
+          setError(err instanceof Error ? err.message : "Failed to load data.");
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeTab, initialData]);
 
   const rawRowsForTab = useMemo(() => {
     if (!dataset) return [];
@@ -481,8 +589,11 @@ export default function EnterpriseOperationsGrids({
           await fetchOperationsData();
           return;
         }
+        const simulated = (data as { simulated?: boolean }).simulated === true || demoMode === true;
         setToastMessage(
-          `✓ Saved ${entity} '${String(row.title ?? row.name ?? row.id)}' (${field} = ${String(event.newValue)})`
+          simulated
+            ? `◈ Simulated (session-persisted demo): ${entity} '${String(row.title ?? row.name ?? row.id)}' (${field} = ${String(event.newValue)})`
+            : `✓ Saved to Neon: ${entity} '${String(row.title ?? row.name ?? row.id)}' (${field} = ${String(event.newValue)})`
         );
       } catch (err) {
         setToastMessage(
@@ -490,14 +601,24 @@ export default function EnterpriseOperationsGrids({
         );
       }
     },
-    [activeTab, fetchOperationsData]
+    [activeTab, demoMode, fetchOperationsData]
   );
 
   const handleExportCsv = useCallback(() => {
-    gridRef.current?.api?.exportDataAsCsv({
+    // Export visible columns only: hide=UX-only, and hidden/sensitive fields
+    // must never leak through CSV. Falls back to default export if the
+    // displayed-columns query is unavailable.
+    const api = gridRef.current?.api;
+    const displayed = api?.getAllDisplayedColumns?.() ?? null;
+    const columnKeys =
+      displayed
+        ?.map((c) => c.getColId())
+        .filter((id) => id !== "__select__") ?? undefined;
+    api?.exportDataAsCsv({
       fileName: `consultai-${activeTab}-${new Date().toISOString().slice(0, 10)}.csv`,
+      ...(columnKeys ? { columnKeys } : {}),
     });
-    setToastMessage(`Exported ${activeTab} grid to CSV.`);
+    setToastMessage(`Exported ${activeTab} grid to CSV (visible columns only).`);
   }, [activeTab]);
 
   const handleRowClicked = useCallback((event: RowClickedEvent) => {
@@ -522,21 +643,21 @@ export default function EnterpriseOperationsGrids({
   ];
 
   return (
-    <div className="flex min-h-[calc(100vh-80px)] flex-col bg-slate-950 p-4 text-slate-100 gap-4">
+    <div className="flex min-h-[calc(100vh-80px)] flex-col bg-[#090c12] p-4 text-slate-100 gap-4">
       {/* ── Header & Cross-Navigation ───────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-900/90 px-5 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-[#0f141e] px-5 py-4">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="rounded bg-blue-500/20 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-blue-400">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-lg font-bold tracking-tight text-white">
+              Operational Management &amp; Data Command Center
+            </h1>
+            <span className="rounded border border-blue-500/25 bg-blue-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-blue-300">
               AG Grid Enterprise Operations
             </span>
-            <h1 className="text-lg font-bold text-white">
-              Operational Management & Data Command Center
-            </h1>
           </div>
           <p className="mt-0.5 text-xs text-slate-400">
             {demoMode
-              ? "Inline editing on Tasks, Consultants, and Projects updates the isolated demo dataset (simulated — nothing is persisted)."
+              ? "Inline editing on Tasks, Consultants, and Projects updates the isolated demo dataset (simulated — persisted to the session demo store only)."
               : "Inline editing on Tasks, Consultants, and Projects synchronizes directly with Neon PostgreSQL and Bryntum Gantt."}
           </p>
         </div>
@@ -549,15 +670,15 @@ export default function EnterpriseOperationsGrids({
           )}
           <a
             href="/planning"
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
+            className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-slate-800"
           >
-            ◈ Open Bryntum Gantt
+            Open Bryntum Gantt
           </a>
           <a
             href="/ai-ops"
-            className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500"
+            className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-500"
           >
-            ✦ AI Operations Center
+            AI Operations Center
           </a>
         </div>
       </div>
@@ -577,15 +698,15 @@ export default function EnterpriseOperationsGrids({
                 setDetailRow(null);
                 setSelectedRows([]);
               }}
-              className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all ${
+              className={`flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-semibold transition ${
                 active
                   ? "border border-blue-500/50 bg-blue-600/20 text-white shadow-sm"
-                  : "border border-transparent bg-slate-900/60 text-slate-400 hover:bg-slate-900 hover:text-slate-200"
+                  : "border border-transparent bg-[#0f141e] text-slate-400 hover:bg-slate-900 hover:text-slate-200"
               }`}
             >
               <span>{t.label}</span>
               <span
-                className={`rounded-full px-1.5 py-0.5 font-mono text-[10px] ${
+                className={`rounded px-1.5 py-0.5 font-mono text-[10px] tabular-nums ${
                   active ? "bg-blue-500 text-white" : "bg-slate-800 text-slate-400"
                 }`}
               >
@@ -597,7 +718,7 @@ export default function EnterpriseOperationsGrids({
       </div>
 
       {/* ── Filter, Search, Grouping Summary & Column Config Toolbar ─────────── */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-2.5 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-[#0f141e] px-4 py-2.5 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <input
             type="search"
@@ -821,30 +942,27 @@ export default function EnterpriseOperationsGrids({
               )}
             </div>
 
-            {/* Structured Key/Value Inspector */}
+            {/* Structured Key/Value Inspector (per-tab allowlist) */}
             <div className="mt-3 space-y-2.5">
-              {Object.entries(detailRow).map(([k, v]) => {
-                if (v === null || v === undefined) return null;
-                return (
-                  <div
-                    key={k}
-                    className="rounded-lg border border-slate-800/80 bg-slate-950/60 p-2.5"
-                  >
-                    <div className="font-mono text-[10px] uppercase text-slate-400">
-                      {k}
-                    </div>
-                    <div className="mt-1 break-words text-xs text-slate-200">
-                      {typeof v === "object" ? (
-                        <pre className="overflow-x-auto font-mono text-[11px] text-slate-300">
-                          {JSON.stringify(v, null, 2)}
-                        </pre>
-                      ) : (
-                        String(v)
-                      )}
-                    </div>
+              {detailEntries(detailRow, activeTab).map(([k, v]) => (
+                <div
+                  key={k}
+                  className="rounded-lg border border-slate-800/80 bg-slate-950/60 p-2.5"
+                >
+                  <div className="font-mono text-[10px] uppercase text-slate-400">
+                    {k}
                   </div>
-                );
-              })}
+                  <div className="mt-1 break-words text-xs text-slate-200">
+                    {typeof v === "object" ? (
+                      <pre className="overflow-x-auto font-mono text-[11px] text-slate-300">
+                        {JSON.stringify(v, null, 2)}
+                      </pre>
+                    ) : (
+                      String(v)
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}

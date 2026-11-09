@@ -3,12 +3,13 @@ export const dynamic = "force-dynamic";
 
 import { db } from "@/lib/db";
 import { milestones, projects } from "@/lib/db/schema";
-import { eq, and, inArray } from "drizzle-orm";
-import { notFound } from "next/navigation";
+import { eq } from "drizzle-orm";
+import { notFound, redirect } from "next/navigation";
 import { PRSubmitForm } from "@/components/delivery/PRSubmitForm";
 import { Badge } from "@/components/ui/badge";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { requirePageRole, candidateIdsForFreelancer } from "@/lib/auth/guards";
 
 export default async function FreelancerDeliverPage({
   params,
@@ -16,6 +17,13 @@ export default async function FreelancerDeliverPage({
   params: Promise<{ milestoneId: string }>;
 }) {
   const { milestoneId } = await params;
+  // Authenticate + authorize BEFORE querying/rendering (demo bypass: fixtures only).
+  const auth = await requirePageRole(["company", "freelancer", "admin"]);
+  if (!auth.demoBypass && !auth.session) {
+    // Live session-less holder: no verified identity to authorize the
+    // delivery workspace — re-authenticate instead of rendering it.
+    redirect("/login");
+  }
   const demoTables = isDemoMode() ? getDemoTables() : null;
 
   const milestone = demoTables
@@ -39,6 +47,18 @@ export default async function FreelancerDeliverPage({
           .where(eq(projects.id, milestone.projectId))
           .limit(1)
       )[0];
+
+  // Live authorization before rendering: company sessions see their own
+  // company's milestones; freelancer sessions only milestones in projects
+  // where they hold a candidacy (by session email/githubHandle).
+  if (!auth.demoBypass) {
+    if (auth.session?.role === "company" && auth.session.companyId) {
+      if (!project || project.companyId !== auth.session.companyId) notFound();
+    } else if (auth.session?.role === "freelancer") {
+      const assigned = await candidateIdsForFreelancer(auth, milestone.projectId);
+      if (assigned !== null && assigned.length === 0) notFound();
+    }
+  }
 
   // Milestone must be funded or submitted to accept a PR
   const canSubmit = ["funded", "submitted", "verifying"].includes(milestone.status);

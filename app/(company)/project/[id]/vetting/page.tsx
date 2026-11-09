@@ -15,12 +15,14 @@ export const dynamic = "force-dynamic";
 
 import { db } from "@/lib/db";
 import { candidates, signals as signalsTable, projects } from "@/lib/db/schema";
-import { eq, sql, inArray } from "drizzle-orm";
+import { eq, sql, inArray, and, ilike, or } from "drizzle-orm";
 import { CandidatesVettingClient } from "./CandidatesVettingClient";
 import { VettingAIHarness } from "@/components/agent/VettingAIHarness";
 import { requirementsFromProject } from "@/lib/vetting/requirements-from-project";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { normalizeCandidateSearchQuery } from "@/lib/vetting/github-handle";
+import { requireProjectAccess } from "@/lib/auth/guards";
 
 interface Props {
   params: Promise<{ id: string }>;
@@ -30,7 +32,10 @@ interface Props {
 export default async function CandidatesVettingPage({ params, searchParams }: Props) {
   const { id: projectId } = await params;
   const resolvedSearch = await searchParams;
-  const query = resolvedSearch.q?.trim() ?? "";
+  // Role gate + company ownership (live); cross-company -> notFound, before any query.
+  await requireProjectAccess(projectId);
+  const rawQuery = resolvedSearch.q?.trim() ?? "";
+  const query = normalizeCandidateSearchQuery(rawQuery);
   const demoTables = isDemoMode() ? getDemoTables() : null;
 
   // Load project for requirements
@@ -47,9 +52,8 @@ export default async function CandidatesVettingPage({ params, searchParams }: Pr
     return <div className="p-6 text-muted-foreground">Project not found.</div>;
   }
 
-  // Search candidates using Postgres full-text search
-  // search_vector is added via migration (not in Drizzle schema) — use raw SQL for FTS query
-  // (demo mode: deterministic substring match over fixture names/skills)
+  // Search candidates using Postgres full-text search + ILIKE fallback
+  // (demo mode: deterministic substring match over fixture names/skills/handles)
   let candidateRows;
   if (demoTables) {
     const q = query.toLowerCase();
@@ -65,14 +69,38 @@ export default async function CandidatesVettingPage({ params, searchParams }: Pr
       )
       .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99));
   } else if (query) {
-    candidateRows = await db
-      .select()
-      .from(candidates)
-      .where(
-        sql`${candidates.projectId} = ${projectId}
-          AND search_vector @@ plainto_tsquery('english', ${query})`
-      )
-      .orderBy(candidates.rank);
+    try {
+      candidateRows = await db
+        .select()
+        .from(candidates)
+        .where(
+          sql`${candidates.projectId} = ${projectId}
+            AND (
+              search_vector @@ plainto_tsquery('english', ${query})
+              OR ${candidates.name} ILIKE ${`%${query}%`}
+              OR ${candidates.email} ILIKE ${`%${query}%`}
+              OR COALESCE(${candidates.githubHandle}, '') ILIKE ${`%${query}%`}
+              OR COALESCE(${candidates.vettingSummary}, '') ILIKE ${`%${query}%`}
+            )`
+        )
+        .orderBy(candidates.rank);
+    } catch {
+      candidateRows = await db
+        .select()
+        .from(candidates)
+        .where(
+          and(
+            eq(candidates.projectId, projectId),
+            or(
+              ilike(candidates.name, `%${query}%`),
+              ilike(candidates.email, `%${query}%`),
+              ilike(candidates.githubHandle ?? sql`''`, `%${query}%`),
+              ilike(candidates.vettingSummary ?? sql`''`, `%${query}%`)
+            )
+          )
+        )
+        .orderBy(candidates.rank);
+    }
   } else {
     candidateRows = await db
       .select()

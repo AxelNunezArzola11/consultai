@@ -15,6 +15,10 @@
  *
  * Auth: requires role=company OR role=freelancer cookie (both can submit).
  *   The payout gate (company only) is enforced separately in /api/paypal/payout.
+ *   Live mode requires a verified session: company sessions are scoped to
+ *   their own company's projects (D.3); freelancer sessions are scoped to
+ *   projects they are assigned to, by session email and/or GitHub handle,
+ *   and missing identity fails closed instead of skipping the check (D.2).
  *
  * Body: {
  *   milestoneId: string,
@@ -35,9 +39,10 @@ import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 
 import { db } from "@/lib/db";
-import { milestones, verificationRuns, agentSteps, paymentProposals, projects } from "@/lib/db/schema";
+import { milestones, verificationRuns, agentSteps, paymentProposals, projects, candidates } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/db/audit";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import {
   parsePrUrl,
@@ -104,12 +109,33 @@ async function recordStep(
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Auth: require any valid role ──────────────────────────────────────────
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
   if (!role) {
     return NextResponse.json(
       { error: "Unauthorized — please select your role on the home page" },
       { status: 401 }
     );
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access); freelancer callers need a
+  // verified session carrying identity (D.2 — missing email/GitHub
+  // identity must not silently bypass assignment verification).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+  }
+  if (role === "freelancer" && !isDemoMode()) {
+    const gateEmail =
+      session?.role === "freelancer" ? session.email.trim().toLowerCase() : "";
+    const gateHandle =
+      session?.role === "freelancer"
+        ? (session.githubHandle ?? "").trim().toLowerCase()
+        : "";
+    if (!gateEmail && !gateHandle) {
+      return NextResponse.json({ error: "missing_freelancer_identity" }, { status: 403 });
+    }
   }
 
   // ── Rate limit: 10 verifications per IP per 5 minutes ─────────────────────
@@ -130,11 +156,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const prUrl = body?.prUrl as string | undefined;
     const expectedAuthor = (body?.expectedAuthor as string | undefined) ?? undefined;
 
-    if (!milestoneId || !prUrl) {
+    if (!milestoneId || typeof milestoneId !== "string" || milestoneId.length > 100 ||
+        !prUrl || typeof prUrl !== "string" || prUrl.length > 2000) {
       return NextResponse.json(
         { error: "milestoneId and prUrl are required" },
         { status: 400 }
       );
+    }
+    if (expectedAuthor !== undefined &&
+        (typeof expectedAuthor !== "string" || expectedAuthor.length > 100)) {
+      return NextResponse.json({ error: "invalid expectedAuthor" }, { status: 400 });
     }
 
     // ── Load milestone + project ──────────────────────────────────────────
@@ -163,6 +194,54 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             .where(eq(projects.id, milestone.projectId))
             .limit(1)
         )[0];
+
+    // ── Ownership scoping ───────────────────────────────────────────────
+    // Company callers: milestone's project must belong to the session company.
+    // Freelancer callers: must be assigned to the project. Identity resolves
+    // from the authenticated account (session email and/or GitHub handle);
+    // in live mode the check always runs (the early gate guarantees a
+    // session with identity), so a missing handle can no longer skip it.
+    if (session?.role === "company" && session.companyId) {
+      const ownerCompanyId = demoTables
+        ? demoTables.projects.find((p) => p.id === milestone.projectId)?.companyId
+        : project?.companyId;
+      if (!ownerCompanyId || ownerCompanyId !== session.companyId) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+    }
+    if (
+      (!demoTables && role === "freelancer") ||
+      (session?.role === "freelancer" && session.githubHandle)
+    ) {
+      const email =
+        session?.role === "freelancer" ? session.email.trim().toLowerCase() : "";
+      const handle =
+        session?.role === "freelancer"
+          ? (session.githubHandle ?? "").trim().toLowerCase()
+          : "";
+      let assigned: boolean;
+      if (demoTables) {
+        assigned = demoTables.candidates.some(
+          (c) =>
+            c.projectId === milestone.projectId &&
+            (c.githubHandle ?? "").toLowerCase() === handle
+        );
+      } else {
+        const projectCandidates = await db
+          .select({ email: candidates.email, githubHandle: candidates.githubHandle })
+          .from(candidates)
+          .where(eq(candidates.projectId, milestone.projectId))
+          .limit(200);
+        assigned = projectCandidates.some(
+          (c) =>
+            (email !== "" && c.email.trim().toLowerCase() === email) ||
+            (handle !== "" && (c.githubHandle ?? "").toLowerCase() === handle)
+        );
+      }
+      if (!assigned) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+    }
 
     const criteria: AcceptanceCriterion[] = Array.isArray(project?.acceptanceCriteria)
       ? (project.acceptanceCriteria as AcceptanceCriterion[])

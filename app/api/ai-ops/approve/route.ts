@@ -13,12 +13,14 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { db } from "@/lib/db";
 import {
   agentExecutions,
   schedulingProposals,
   milestones,
+  projects,
 } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/db/audit";
 import { ensureAiOpsTables, type MilestoneAdjustmentItem } from "@/lib/ai-ops/orchestrator-engine";
@@ -30,12 +32,21 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Auth: require verified role=company or role=admin cookie ──────────────
   // No body fallback: self-asserted actor_role must never authorize proposals.
-  const actorRole = await getRoleFromCookie(req.headers.get("cookie"));
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const actorRole = session?.role ?? (await getRoleFromCookie(cookieHeader));
   if (actorRole !== "company" && actorRole !== "admin") {
     return NextResponse.json(
       { error: "Forbidden: Only company or admin human operators can authorize proposals." },
       { status: 403 }
     );
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access). This also binds actorId
+  // to the session in live mode (no body fallback).
+  if (!companySessionAllowsLiveAccess(actorRole, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
   }
 
   // ── Rate limit: 10 approvals per IP per 60 s ──────────────────────────────
@@ -56,8 +67,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const executionId = body?.execution_id ?? body?.executionId;
     const proposalId = body?.proposal_id ?? body?.proposalId;
     const decision = body?.decision as "approved" | "rejected" | undefined;
-    const actorId = (body?.actor_id ?? body?.actorId ?? "company-human-reviewer").trim();
-    const reason = (body?.reason ?? "Reviewed and authorized by human operator").trim();
+    const rawActorId = body?.actor_id ?? body?.actorId ?? "company-human-reviewer";
+    const rawReason = body?.reason ?? "Reviewed and authorized by human operator";
+    if (typeof rawActorId !== "string" || rawActorId.length > 200 ||
+        typeof rawReason !== "string" || rawReason.length > 2000) {
+      return NextResponse.json({ error: "invalid actor_id or reason" }, { status: 400 });
+    }
+    if ((executionId !== undefined && (typeof executionId !== "string" || executionId.length > 100)) ||
+        (proposalId !== undefined && (typeof proposalId !== "string" || proposalId.length > 100))) {
+      return NextResponse.json({ error: "invalid execution_id or proposal_id" }, { status: 400 });
+    }
+    // Actor identity binds to the authenticated session when one exists;
+    // the body value is only a display fallback for session-less callers.
+    const actorId = session ? `${session.role}:${session.userId}` : rawActorId.trim();
+    const reason = rawReason.trim();
 
     if (!decision || (decision !== "approved" && decision !== "rejected")) {
       return NextResponse.json(
@@ -93,6 +116,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         : executionId
           ? t.schedulingProposals.filter((sp) => sp.executionId === executionId)
           : [];
+      if (session?.role === "company" && session.companyId) {
+        for (const sp of targets) {
+          const demoProject = t.projects.find((p) => p.id === sp.projectId);
+          if (!demoProject || demoProject.companyId !== session.companyId) {
+            return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+          }
+        }
+      }
       for (const sp of targets) {
         if (decision === "approved") {
           const adjustments = (Array.isArray(sp.adjustments)
@@ -183,6 +214,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           .from(schedulingProposals)
           .where(eq(schedulingProposals.executionId, executionId))
       : [];
+
+    if (session?.role === "company" && session.companyId) {
+      for (const sp of targetSchedProposals) {
+        const [spProject] = await db
+          .select({ companyId: projects.companyId })
+          .from(projects)
+          .where(eq(projects.id, sp.projectId))
+          .limit(1);
+        if (!spProject || spProject.companyId !== session.companyId) {
+          return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+        }
+      }
+      if (executionId && targetSchedProposals.length === 0) {
+        const [exec] = await db
+          .select({ projectId: agentExecutions.projectId })
+          .from(agentExecutions)
+          .where(eq(agentExecutions.id, executionId))
+          .limit(1);
+        if (exec?.projectId) {
+          const [execProject] = await db
+            .select({ companyId: projects.companyId })
+            .from(projects)
+            .where(eq(projects.id, exec.projectId))
+            .limit(1);
+          if (!execProject || execProject.companyId !== session.companyId) {
+            return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+          }
+        }
+      }
+    }
 
     for (const sp of targetSchedProposals) {
       if (decision === "approved") {

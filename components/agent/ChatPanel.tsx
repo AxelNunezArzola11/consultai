@@ -13,6 +13,8 @@
  */
 
 import React, { useRef, useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import ReactMarkdown from "react-markdown";
@@ -34,6 +36,8 @@ interface ChatPanelProps {
   /** Called on any LLM / network error — parent shows fallback editor */
   onLLMError: (err: string) => void;
   initialBrief?: string;
+  /** Creation title; sent with planner APIs for demo rehydration. */
+  projectTitle?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,11 +118,13 @@ interface ApprovePlanButtonProps {
   plan: BriefPlan;
   projectId: string;
   agentSessionId: string;
+  projectTitle?: string;
   onSaved: (plan: BriefPlan, milestoneCount: number, downgradedCriteria: string[]) => void;
   onError: (msg: string) => void;
 }
 
-function ApprovePlanButton({ plan, projectId, agentSessionId, onSaved, onError }: ApprovePlanButtonProps) {
+function ApprovePlanButton({ plan, projectId, agentSessionId, projectTitle, onSaved, onError }: ApprovePlanButtonProps) {
+  const router = useRouter();
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -128,7 +134,7 @@ function ApprovePlanButton({ plan, projectId, agentSessionId, onSaved, onError }
       const res = await fetch("/api/db/save-brief", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, agentSessionId, plan }),
+        body: JSON.stringify({ projectId, agentSessionId, plan, projectTitle }),
       });
       const data = await res.json() as {
         ok: boolean;
@@ -142,19 +148,32 @@ function ApprovePlanButton({ plan, projectId, agentSessionId, onSaved, onError }
       }
       setSaved(true);
       onSaved(plan, data.milestoneCount ?? plan.milestones.length, data.downgradedCriteria ?? []);
+      router.refresh();
     } catch (err) {
       onError(err instanceof Error ? err.message : "Network error saving plan");
     } finally {
       setSaving(false);
     }
-  }, [plan, projectId, agentSessionId, onSaved, onError]);
+  }, [plan, projectId, agentSessionId, projectTitle, onSaved, onError, router]);
 
   if (saved) {
     return (
-      <div className="mt-2 flex items-center gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-2">
         <Badge className="text-xs bg-emerald-600 hover:bg-emerald-700">
           ✅ Plan saved — {plan.milestones.length} milestones
         </Badge>
+        <Link
+          href="/dashboard"
+          className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-200 hover:bg-slate-700"
+        >
+          View on Dashboard →
+        </Link>
+        <Link
+          href={`/project/${projectId}/milestones`}
+          className="rounded-lg bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-500"
+        >
+          Open Milestones →
+        </Link>
       </div>
     );
   }
@@ -190,6 +209,7 @@ export function ChatPanel({
   onPlanUpdate,
   onLLMError,
   initialBrief,
+  projectTitle,
 }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [input, setInput] = useState(initialBrief ?? "");
@@ -204,13 +224,16 @@ export function ChatPanel({
   // Track which message IDs have been saved (to show saved badge persistently)
   const [savedMessageIds, setSavedMessageIds] = useState<Set<string>>(new Set());
 
-  // Build transport once (stable reference)
-  const transport = useRef(
-    new DefaultChatTransport({
-      api: "/api/agent/brief",
-      body: { projectId, agentSessionId },
-    })
-  ).current;
+  // Build transport once (stable reference via lazy initial state: same
+  // single construction with the initial projectId/agentSessionId as before,
+  // without reading a ref value during render).
+  const [transport] = useState(
+    () =>
+      new DefaultChatTransport({
+        api: "/api/agent/brief",
+        body: { projectId, agentSessionId, projectTitle },
+      })
+  );
 
   const {
     messages,
@@ -383,6 +406,7 @@ export function ChatPanel({
                     plan={plan}
                     projectId={projectId}
                     agentSessionId={agentSessionId}
+                    projectTitle={projectTitle}
                     onSaved={(savedPlan, milestoneCount, downgradedCriteria) => {
                       setSavedMessageIds((prev) => new Set(prev).add(msg.id));
                       onPlanUpdate(savedPlan);
@@ -399,9 +423,23 @@ export function ChatPanel({
 
                 {/* Already-saved badge */}
                 {plan && alreadySaved && (
-                  <Badge className="text-xs bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 mt-1">
-                    ✅ Plan saved — {plan.milestones.length} milestones
-                  </Badge>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <Badge className="text-xs bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                      ✅ Plan saved — {plan.milestones.length} milestones
+                    </Badge>
+                    <Link
+                      href="/dashboard"
+                      className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                    >
+                      View on Dashboard →
+                    </Link>
+                    <Link
+                      href={`/project/${projectId}/milestones`}
+                      className="rounded-lg bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-500"
+                    >
+                      Open Milestones →
+                    </Link>
+                  </div>
                 )}
               </div>
             </div>

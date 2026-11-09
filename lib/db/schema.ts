@@ -976,3 +976,58 @@ export const schedulingProposals = pgTable("scheduling_proposals", {
     .defaultNow(),
 });
 
+// ---------------------------------------------------------------------------
+// users & auth_sessions (Phase 8 — Secure Account Registration & Login)
+// ---------------------------------------------------------------------------
+
+export const userRoleEnum = pgEnum("user_role", [
+  "company",
+  "freelancer",
+  "admin",
+]);
+
+export const users = pgTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  name: text("name").notNull(),
+  passwordHash: text("password_hash").notNull(),
+  role: userRoleEnum("role").notNull(),
+  /** Linked company when role === "company" */
+  companyId: text("company_id").references(() => companies.id),
+  /** Optional role/title within the company or freelance specialty */
+  title: text("title"),
+  /** Canonical normalized GitHub handle (lowercase, no leading @) for freelancers */
+  githubHandle: text("github_handle"),
+  portfolioUrl: text("portfolio_url"),
+  skills: jsonb("skills").default([]),
+  bio: text("bio"),
+  hourlyRateUsd: decimal("hourly_rate_usd", { precision: 10, scale: 2 }),
+  availability: text("availability").default("available"),
+  termsAcceptedAt: timestamp("terms_accepted_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+export const authSessions = pgTable("auth_sessions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id),
+  /** SHA-256 hex of the opaque session token */
+  tokenHash: text("token_hash").notNull().unique(),
+  role: userRoleEnum("role").notNull(),
+  companyId: text("company_id"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+

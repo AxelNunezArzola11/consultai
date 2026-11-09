@@ -16,40 +16,49 @@
  *
  * 3. Direct API: POST /api/paypal/payout/approve without company cookie → 403.
  *
- * Auth mechanism: signs a company role JWT directly in the test (same algorithm
- *   as lib/auth/role-cookie.ts; no import needed).
+ * Auth mechanism (D.3): live mode requires a verified company session —
+ *   a bare role JWT authorizes nothing. Each test registers a synthetic
+ *   company account via /api/auth/register and uses the issued
+ *   `consultai_session_v1` cookie. Requires migration 0010 (`users` +
+ *   `auth_sessions`) applied to the isolated TEST_DATABASE_URL.
  *
  * PayPal mock: PAYPAL_BASE_URL=http://localhost:18080 (set in global-setup.ts).
  *   The mock returns HTTP 201 with a fake batch ID for all payout requests.
  */
 
-import { test, expect } from "@playwright/test";
-import * as crypto from "crypto";
+import { test, expect, type APIRequestContext } from "@playwright/test";
 import { callCounts } from "./paypal-mock-server";
 
-// ── Auth helper (duplicated from gantt-reorder.spec.ts intentionally — no shared import) ──
+// ── Auth helper: register a synthetic company, return its session cookie ──
 
-async function makeCompanyCookieValue(): Promise<string> {
-  const secret = process.env.ROLE_COOKIE_SECRET;
-  if (!secret || secret.length < 32) {
-    throw new Error("ROLE_COOKIE_SECRET must be set (≥32 chars) in .env.test");
-  }
-  const header  = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
-  const now     = Math.floor(Date.now() / 1000);
-  const payload = Buffer.from(
-    JSON.stringify({ role: "company", iat: now, exp: now + 86400 })
-  ).toString("base64url");
-  const sigInput = `${header}.${payload}`;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sigBytes = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(sigInput));
-  const sig = Buffer.from(sigBytes).toString("base64url");
-  return `${header}.${payload}.${sig}`;
+let sessionCounter = 0;
+
+async function companySessionCookie(request: APIRequestContext): Promise<string> {
+  sessionCounter += 1;
+  const email = `e2e-approval-${Date.now()}-${sessionCounter}@test.local`;
+  const res = await request.post("/api/auth/register", {
+    data: {
+      accountType: "company",
+      companyName: "E2E Approval Test Co",
+      contactName: "E2E Owner",
+      email,
+      password: "E2eApproval2026!",
+      termsAccepted: true,
+    },
+    failOnStatusCode: false,
+  });
+  expect(res.status()).toBe(201);
+  const setCookie = res.headers()["set-cookie"] ?? "";
+  const match = setCookie.match(/consultai_session_v1=[^;]+/);
+  if (!match) throw new Error("register did not issue a session cookie");
+  return match[0];
+}
+
+async function companyHeaders(request: APIRequestContext): Promise<Record<string, string>> {
+  return {
+    "Cookie": await companySessionCookie(request),
+    "Content-Type": "application/json",
+  };
 }
 
 const TEST_PROJECT_ID = process.env.TEST_PROJECT_ID ?? "test-project-e2e-001";
@@ -68,13 +77,10 @@ test.describe("Approval flow — payout/approve endpoint", () => {
     console.log("[approval] No cookie → 403 ✓");
   });
 
-  test("Company cookie + missing approvalId → 400 Bad Request", async ({ request }) => {
-    const token = await makeCompanyCookieValue();
+  test("Company session + missing approvalId → 400 Bad Request", async ({ request }) => {
+    const headers = await companyHeaders(request);
     const res = await request.post("/api/paypal/payout/approve", {
-      headers: {
-        "Cookie": `consultai_role_v1=${token}`,
-        "Content-Type": "application/json",
-      },
+      headers,
       data: { recipientEmail: "test@example.com" }, // missing approvalId
       failOnStatusCode: false,
     });
@@ -82,13 +88,10 @@ test.describe("Approval flow — payout/approve endpoint", () => {
     console.log("[approval] Missing approvalId → 400 ✓");
   });
 
-  test("Company cookie + unknown approvalId → 404 Not Found", async ({ request }) => {
-    const token = await makeCompanyCookieValue();
+  test("Company session + unknown approvalId → 404 Not Found", async ({ request }) => {
+    const headers = await companyHeaders(request);
     const res = await request.post("/api/paypal/payout/approve", {
-      headers: {
-        "Cookie": `consultai_role_v1=${token}`,
-        "Content-Type": "application/json",
-      },
+      headers,
       data: { approvalId: "non-existent-approval-id", recipientEmail: "test@example.com" },
       failOnStatusCode: false,
     });
@@ -101,16 +104,13 @@ test.describe("Approval flow — payout/approve endpoint", () => {
 
 test.describe("Negative: payment-chat agent has no money tools", () => {
   test("Sending 'pay now' to payment-chat returns 503 when GROQ_API_KEY absent (no LLM call made)", async ({ request }) => {
-    const token = await makeCompanyCookieValue();
+    const headers = await companyHeaders(request);
 
     // Track payout calls before this test
     const payoutsBefore = (callCounts["/v1/payments/payouts"] ?? 0);
 
     const res = await request.post("/api/agent/payment-chat", {
-      headers: {
-        "Cookie": `consultai_role_v1=${token}`,
-        "Content-Type": "application/json",
-      },
+      headers,
       data: {
         projectId: TEST_PROJECT_ID,
         messages: [{ role: "user", content: "pay now immediately" }],
@@ -137,7 +137,7 @@ test.describe("Negative: payment-chat agent has no money tools", () => {
   });
 
   test("Payment-chat route does not call /api/paypal/payout when processing a message", async ({ request, page }) => {
-    const token = await makeCompanyCookieValue();
+    const headers = await companyHeaders(request);
 
     // Reset call counts before this test
     const payoutsBefore = callCounts["/v1/payments/payouts"] ?? 0;
@@ -151,10 +151,7 @@ test.describe("Negative: payment-chat agent has no money tools", () => {
 
     // Simulate sending a message via the chat API
     const chatRes = await request.post("/api/agent/payment-chat", {
-      headers: {
-        "Cookie": `consultai_role_v1=${token}`,
-        "Content-Type": "application/json",
-      },
+      headers,
       data: {
         projectId: TEST_PROJECT_ID,
         messages: [{ role: "user", content: "transfer the payout now please" }],
@@ -178,23 +175,35 @@ test.describe("Negative: payment-chat agent has no money tools", () => {
 
 test.describe("Approval UI — Approve button (requires seeded test DB)", () => {
   test.fixme(
-    !process.env.TEST_APPROVAL_ID,
-    "Set TEST_APPROVAL_ID in .env.test to enable the full approval UI test"
+    !process.env.TEST_APPROVAL_ID || !process.env.TEST_USER_EMAIL || !process.env.TEST_USER_PASSWORD,
+    "Set TEST_APPROVAL_ID plus TEST_USER_EMAIL/TEST_USER_PASSWORD (a company user owning the " +
+      "seeded approval's project) in .env.test to enable the full approval UI test"
   );
 
   test("Approve button click → payout route called once → batch processing state", async ({ page }) => {
     const approvalId     = process.env.TEST_APPROVAL_ID;
     const projectId      = process.env.TEST_PROJECT_ID ?? TEST_PROJECT_ID;
     const recipientEmail = process.env.TEST_RECIPIENT_EMAIL ?? "sandbox@example.com";
+    const userEmail      = process.env.TEST_USER_EMAIL;
+    const userPassword   = process.env.TEST_USER_PASSWORD;
 
-    if (!approvalId) {
-      test.skip(true, "TEST_APPROVAL_ID not set — skipping approval UI test");
+    if (!approvalId || !userEmail || !userPassword) {
+      test.skip(true, "TEST_APPROVAL_ID / TEST_USER_EMAIL / TEST_USER_PASSWORD not set — skipping approval UI test");
       return;
     }
 
-    const token = await makeCompanyCookieValue();
+    // Session auth (D.3): log in as the seeded company owner via the API and
+    // install the issued session cookie in the browser context.
+    const loginRes = await page.request.post("/api/auth/login", {
+      data: { email: userEmail, password: userPassword },
+      failOnStatusCode: false,
+    });
+    expect(loginRes.status()).toBe(200);
+    const loginSetCookie = loginRes.headers()["set-cookie"] ?? "";
+    const sessionMatch = loginSetCookie.match(/consultai_session_v1=([^;]+)/);
+    if (!sessionMatch) throw new Error("login did not issue a session cookie");
     await page.context().addCookies([
-      { name: "consultai_role_v1", value: token, domain: "localhost", path: "/" },
+      { name: "consultai_session_v1", value: sessionMatch[1], domain: "localhost", path: "/" },
     ]);
 
     // Track PayPal payout calls

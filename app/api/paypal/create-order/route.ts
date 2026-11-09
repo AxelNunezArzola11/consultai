@@ -42,9 +42,10 @@ import { nanoid } from "nanoid";
 
 import { paypalFetch, safeJson } from "@/lib/paypal/client";
 import { db } from "@/lib/db";
-import { milestones, payments } from "@/lib/db/schema";
+import { milestones, payments, projects } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/db/audit";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { isDemoMode } from "@/lib/demo/config";
 import { demoBlocked } from "@/lib/demo/guard";
@@ -62,9 +63,17 @@ function estimateFee(amount: number): number {
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (isDemoMode()) return demoBlocked("PayPal order creation");
   // ── Auth: require role=company or role=admin cookie ───────────────────────
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
   if (role !== "company" && role !== "admin") {
     return NextResponse.json({ error: "Forbidden: company or admin role required" }, { status: 403 });
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
   }
 
   // ── Rate limit: 20 order creations per IP per 60 s ────────────────────────
@@ -81,7 +90,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const body = await req.json().catch(() => null);
     const milestoneId = body?.milestoneId as string | undefined;
 
-    if (!milestoneId) {
+    if (!milestoneId || typeof milestoneId !== "string" || milestoneId.length > 100) {
       return NextResponse.json({ error: "milestoneId required" }, { status: 400 });
     }
 
@@ -94,6 +103,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (!milestone) {
       return NextResponse.json({ error: "Milestone not found" }, { status: 404 });
+    }
+
+    if (session?.role === "company" && session.companyId) {
+      const [project] = await db
+        .select({ companyId: projects.companyId })
+        .from(projects)
+        .where(eq(projects.id, milestone.projectId))
+        .limit(1);
+      if (!project || project.companyId !== session.companyId) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
     }
 
     if (milestone.status !== "planned") {
@@ -180,7 +200,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       entityType: "payment",
       entityId:   paymentId,
       event:      "ORDER_CREATED",
-      actor:      "system",
+      actor:      session ? `${session.role}:${session.userId}` : "system",
       payload: {
         milestoneId,
         orderId,

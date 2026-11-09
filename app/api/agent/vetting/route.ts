@@ -30,14 +30,33 @@ import { candidates, projects } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
 import { runVetting } from "@/lib/vetting/orchestrator";
 import { getRoleFromCookie } from "@/lib/auth/role-cookie";
+import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth/session";
+import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { requirementsFromProject } from "@/lib/vetting/requirements-from-project";
 import { isDemoMode } from "@/lib/demo/config";
 
 export async function POST(request: NextRequest) {
   // Role check
-  const role = await getRoleFromCookie(request.headers.get("cookie"));
-  if (role !== "company") {
+  const cookieHeader = request.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
+  if (role !== "company" && role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return NextResponse.json({ error: "missing_company_context" }, { status: 403 });
+  }
+
+  const ip = getIp(request);
+  const { ok, retryAfterSec } = checkRateLimit("vetting", ip, 10, 300);
+  if (!ok) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
   }
 
   let body: { candidateId?: string; projectId?: string };
@@ -48,7 +67,8 @@ export async function POST(request: NextRequest) {
   }
 
   const { candidateId, projectId } = body;
-  if (!candidateId || !projectId) {
+  if (!candidateId || typeof candidateId !== "string" || candidateId.length > 100 ||
+      !projectId || typeof projectId !== "string" || projectId.length > 100) {
     return NextResponse.json(
       { error: "candidateId and projectId are required" },
       { status: 400 }
@@ -82,6 +102,10 @@ export async function POST(request: NextRequest) {
     const project = t.projects.find((p) => p.id === projectId);
     if (!project) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    if (session?.role === "company" && session.companyId &&
+        project.companyId !== session.companyId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
     // Deterministic simulated run over the fixture signals — same scoring code.
     const demoSignals = t.signals
@@ -156,6 +180,10 @@ export async function POST(request: NextRequest) {
 
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
+  }
+  if (session?.role === "company" && session.companyId &&
+      project.companyId !== session.companyId) {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
   // Derive requirements from whatever project data is available.

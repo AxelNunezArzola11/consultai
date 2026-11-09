@@ -14,6 +14,7 @@
  */
 
 import { NextRequest, after } from "next/server";
+import { revalidatePath } from "next/cache";
 import { db } from "@/lib/db";
 import { projects, milestones, auditLog, briefDrafts } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
@@ -22,28 +23,55 @@ import { normalizeBriefPlan } from "@/lib/brief/schema";
 import { isDemoMode } from "@/lib/demo/config";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   // ── 0. Authorization: company or admin only ─────────────────────────────────
   const { getRoleFromCookie } = await import("@/lib/auth/role-cookie");
-  const role = await getRoleFromCookie(req.headers.get("cookie"));
+  const { companySessionAllowsLiveAccess, getSessionFromCookie } = await import("@/lib/auth/session");
+  const { checkRateLimit, getIp } = await import("@/lib/auth/rate-limit");
+  const cookieHeader = req.headers.get("cookie") ?? null;
+  const session = await getSessionFromCookie(cookieHeader);
+  const role = session?.role ?? (await getRoleFromCookie(cookieHeader));
   if (role !== "company" && role !== "admin") {
     return Response.json(
       { ok: false, errors: ["Saving plans requires the company or admin role. Use Switch Role to continue as a company operator."] },
       { status: 403 }
     );
   }
-  void role;
+
+  // Live mode: company callers need a verified session (D.3 — a bare role
+  // cookie must never authorize company access).
+  if (!companySessionAllowsLiveAccess(role, session)) {
+    return Response.json(
+      { ok: false, errors: ["Live mode requires a verified company session."] },
+      { status: 403 }
+    );
+  }
+
+  const ip = getIp(req);
+  const { ok, retryAfterSec } = checkRateLimit("save-brief", ip, 10, 60);
+  if (!ok) {
+    return Response.json(
+      { ok: false, errors: ["Rate limit exceeded"] },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    );
+  }
 
   // ── 1. Parse body ──────────────────────────────────────────────────────────
-  let body: { projectId?: string; agentSessionId?: string; plan?: unknown };
+  let body: {
+    projectId?: string;
+    agentSessionId?: string;
+    plan?: unknown;
+    projectTitle?: string;
+  };
   try {
     body = await req.json();
   } catch {
     return Response.json({ ok: false, errors: ["Invalid JSON body"] }, { status: 400 });
   }
 
-  const { projectId, agentSessionId, plan } = body;
+  const { projectId, agentSessionId, plan, projectTitle } = body;
 
   if (!projectId || typeof projectId !== "string" || projectId.length > 100) {
     return Response.json({ ok: false, errors: ["projectId required"] }, { status: 400 });
@@ -60,16 +88,48 @@ export async function POST(req: NextRequest) {
   // ── Demo mode: same validation, writes go to the isolated in-memory store ──
   if (isDemoMode()) {
     const { getDemoTables, appendDemoAudit } = await import("@/lib/demo/store");
+    const {
+      demoCompanyForSession,
+      resolveDemoDraftForPlanning,
+    } = await import("@/lib/demo/drafts");
     const t = getDemoTables();
-    const project = t.projects.find((p) => p.id === projectId);
+    let project = t.projects.find((p) => p.id === projectId);
+    // Serverless-safe: a cold instance rehydrates the POST-accepted draft
+    // from the creation title; bare IDs still 404 honestly.
+    if (!project) {
+      const rehydrated = resolveDemoDraftForPlanning({
+        projectId,
+        title: projectTitle,
+        companyId: demoCompanyForSession(session?.companyId),
+      });
+      if (rehydrated) {
+        project = t.projects.find((p) => p.id === projectId);
+      }
+    }
     if (!project) {
       return Response.json({ ok: false, errors: ["Project not found"] }, { status: 404 });
+    }
+    if (session?.role === "company" && session.companyId &&
+        project.companyId !== session.companyId) {
+      return Response.json({ ok: false, errors: ["Forbidden"] }, { status: 403 });
     }
     const { plan: normalized, downgradedCriteria, errors } = normalizeBriefPlan(plan);
     if (errors.length > 0) {
       return Response.json({ ok: false, errors }, { status: 422 });
     }
+    if (
+      normalized.projectTitle &&
+      normalized.projectTitle.trim() &&
+      (!project.title || project.title === "New project")
+    ) {
+      project.title = normalized.projectTitle.trim().slice(0, 200);
+    }
+    const flattenedCriteria = normalized.milestones.flatMap(
+      (m) => m.acceptanceCriteria ?? []
+    );
+    project.status = "active";
     project.structuredPlan = normalized as Record<string, unknown>;
+    project.acceptanceCriteria = flattenedCriteria as unknown;
     project.updatedAt = new Date();
     t.milestones = t.milestones.filter(
       (m) => !(m.projectId === projectId && m.status === "planned")
@@ -116,8 +176,18 @@ export async function POST(req: NextRequest) {
         totalBudgetUsd: normalized.totalBudgetUsd,
       },
     });
+    try {
+      revalidatePath("/dashboard");
+      revalidatePath("/planning");
+      revalidatePath("/operations");
+      revalidatePath(`/project/${projectId}/milestones`);
+    } catch {
+      // revalidatePath may no-op in unit tests outside Next request context
+    }
     return Response.json({
       ok: true,
+      projectTitle: project.title,
+      status: project.status,
       milestoneCount: normalized.milestones.length,
       totalBudgetUsd: normalized.totalBudgetUsd,
       downgradedCriteria,
@@ -127,7 +197,7 @@ export async function POST(req: NextRequest) {
 
   // ── 2. Validate project exists ─────────────────────────────────────────────
   const projectRows = await db
-    .select({ id: projects.id })
+    .select({ id: projects.id, title: projects.title, companyId: projects.companyId })
     .from(projects)
     .where(eq(projects.id, projectId))
     .limit(1);
@@ -135,6 +205,11 @@ export async function POST(req: NextRequest) {
   if (projectRows.length === 0) {
     console.error("[save-brief] project not found:", projectId);
     return Response.json({ ok: false, errors: ["Project not found"] }, { status: 404 });
+  }
+  const existingProject = projectRows[0];
+  if (session?.role === "company" && session.companyId &&
+      existingProject.companyId !== session.companyId) {
+    return Response.json({ ok: false, errors: ["Forbidden"] }, { status: 403 });
   }
 
   // ── 3. Normalize + validate plan ───────────────────────────────────────────
@@ -144,8 +219,15 @@ export async function POST(req: NextRequest) {
     return Response.json({ ok: false, errors }, { status: 422 });
   }
 
+  const resolvedTitle =
+    normalized.projectTitle &&
+    normalized.projectTitle.trim() &&
+    (!existingProject.title || existingProject.title === "New project")
+      ? normalized.projectTitle.trim().slice(0, 200)
+      : existingProject.title || normalized.projectTitle || "New project";
+
   console.log("[save-brief] plan validated:", {
-    projectTitle: normalized.projectTitle,
+    projectTitle: resolvedTitle,
     totalBudgetUsd: normalized.totalBudgetUsd,
     milestoneCount: normalized.milestones.length,
     milestones: normalized.milestones.map((m, i) => ({
@@ -163,12 +245,18 @@ export async function POST(req: NextRequest) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // 4a. Update projects.structured_plan
+    // 4a. Update projects.structured_plan, title, status, and acceptanceCriteria
+    const flattenedCriteria = normalized.milestones.flatMap(
+      (m) => m.acceptanceCriteria ?? []
+    );
     console.log("[save-brief] updating projects.structured_plan for:", projectId);
     const updateResult = await db
       .update(projects)
       .set({
+        title: resolvedTitle,
+        status: "active",
         structuredPlan: normalized as Record<string, unknown>,
+        acceptanceCriteria: flattenedCriteria as unknown,
         updatedAt: new Date(),
       })
       .where(eq(projects.id, projectId));
@@ -272,8 +360,19 @@ export async function POST(req: NextRequest) {
     totalBudgetUsd: normalized.totalBudgetUsd,
   });
 
+  try {
+    revalidatePath("/dashboard");
+    revalidatePath("/planning");
+    revalidatePath("/operations");
+    revalidatePath(`/project/${projectId}/milestones`);
+  } catch {
+    // revalidatePath may no-op in unit tests outside Next request context
+  }
+
   return Response.json({
     ok: true,
+    projectTitle: resolvedTitle,
+    status: "active",
     milestoneCount: normalized.milestones.length,
     totalBudgetUsd: normalized.totalBudgetUsd,
     downgradedCriteria,

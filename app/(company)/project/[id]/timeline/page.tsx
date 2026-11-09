@@ -8,6 +8,7 @@ import { notFound } from "next/navigation";
 import { TimelineClient } from "./TimelineClient";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { requireProjectAccess } from "@/lib/auth/guards";
 
 /**
  * Timeline page — /project/[id]/timeline
@@ -26,6 +27,8 @@ export default async function TimelinePage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  // Role gate + company ownership (live); cross-company -> notFound, before any query.
+  await requireProjectAccess(id);
 
   if (isDemoMode()) {
     const t = getDemoTables();

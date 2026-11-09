@@ -15,6 +15,7 @@
  */
 
 import { SignJWT, jwtVerify } from "jose";
+import { getSessionFromCookie } from "./session";
 
 const COOKIE_NAME = "consultai_role_v1";
 const MAX_AGE_S = 60 * 60 * 24; // 24 hours
@@ -74,12 +75,19 @@ export async function signRoleCookie(role: Role): Promise<string> {
 
 /**
  * Returns the role from the request cookie, or null if absent/invalid/expired.
+ * First checks authenticated user session cookie (`consultai_session_v1`),
+ * then falls back to the demo role cookie (`consultai_role_v1`).
  * Never throws — always returns null on any error.
  */
 export async function getRoleFromCookie(
   cookieHeader: string | null
 ): Promise<Role | null> {
   if (!cookieHeader) return null;
+
+  const session = await getSessionFromCookie(cookieHeader);
+  if (session?.role) {
+    return session.role;
+  }
 
   const match = cookieHeader
     .split(";")
@@ -102,6 +110,18 @@ export async function getRoleFromCookie(
   } catch {
     return null;
   }
+}
+
+/**
+ * Returns the authenticated user's companyId if logged in via `consultai_session_v1`,
+ * or null when using the unauthenticated demo role switcher.
+ */
+export async function getCompanyIdFromCookie(
+  cookieHeader: string | null
+): Promise<string | null> {
+  if (!cookieHeader) return null;
+  const session = await getSessionFromCookie(cookieHeader);
+  return session?.companyId ?? null;
 }
 
 /**

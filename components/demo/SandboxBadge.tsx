@@ -10,7 +10,7 @@ export function SandboxBadge() {
     <div
       role="banner"
       aria-label="PayPal Sandbox Mode"
-      className="w-full bg-amber-50 border-b border-amber-200 text-amber-800 text-xs font-medium text-center py-1.5 px-4 z-50"
+      className="w-full bg-amber-950/35 border-b border-amber-500/20 text-amber-200/90 text-[11px] font-medium text-center py-1 px-4 z-50"
     >
       ⚠️ PayPal Sandbox Mode — no real transactions
     </div>

@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ActivityStream } from "@/components/delivery/ActivityStream";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
+import { requireProjectAccess } from "@/lib/auth/guards";
 
 export default async function CompanyDeliveryPage({
   params,
@@ -18,6 +19,8 @@ export default async function CompanyDeliveryPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  // Role gate + company ownership (live); cross-company -> notFound, before any query.
+  await requireProjectAccess(id);
   const demoTables = isDemoMode() ? getDemoTables() : null;
 
   const project = demoTables
