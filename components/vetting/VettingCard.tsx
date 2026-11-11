@@ -15,6 +15,11 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import type { MatrixEntry, Signal, ScoreBreakdown } from "@/lib/vetting/signals";
 import { GitHubDiagram } from "@/components/vetting/GitHubDiagram";
 import { buildQuadrantDiagram } from "@/lib/vetting/github-diagram";
+import { vettingRunFeedback } from "@/lib/vetting/run-feedback";
+import {
+  describeVettingDiagnostics,
+  type VettingDiagnostics,
+} from "@/lib/vetting/diagnostics";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,6 +39,8 @@ export interface VettingCardProps {
   scoreBreakdown: ScoreBreakdown | null;
   matrix: MatrixEntry[];
   signals: Signal[];
+  /** Persisted last-run diagnostics — explains the score (especially 0) */
+  diagnostics?: VettingDiagnostics | null;
   humanReviewNotice: string;
   scoringFormula: string;
   isShortlisted: boolean;
@@ -192,6 +199,7 @@ export function VettingCard({
   scoreBreakdown,
   matrix,
   signals,
+  diagnostics,
   humanReviewNotice,
   scoringFormula,
   isShortlisted,
@@ -208,6 +216,7 @@ export function VettingCard({
   const [isPdfLoading, setIsPdfLoading] = useState(false);
 
   const score = trustScore ?? 0;
+  const banner = describeVettingDiagnostics(diagnostics ?? null, trustScore);
 
   const stackMatch = scoreBreakdown?.bySignalType?.github_repo?.avgConfidence ?? 0;
   const diagramResult = buildQuadrantDiagram([
@@ -278,6 +287,19 @@ export function VettingCard({
         body: JSON.stringify({ candidateId: candidate.id, projectId }),
       });
       if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as {
+          signalCount?: number;
+          usedFallback?: boolean;
+          errors?: string[];
+        };
+        const feedback = vettingRunFeedback({
+          signalCount: data.signalCount,
+          usedFallback: data.usedFallback,
+          errors: data.errors,
+        });
+        if (feedback.kind === "empty") {
+          toast.error(feedback.message);
+        }
         onRerunVetting?.(candidate.id);
       } else {
         const errBody = await res.json().catch(() => ({})) as Record<string, unknown>;
@@ -372,6 +394,27 @@ export function VettingCard({
       </CardHeader>
 
       <CardContent className="space-y-3 pt-0">
+        {/* Persistent run diagnostics — always explains a 0 score */}
+        {banner && (
+          <div
+            role={banner.tone === "error" ? "alert" : "status"}
+            className={[
+              "rounded-lg border p-2.5 text-[11px] leading-relaxed",
+              banner.tone === "error"
+                ? "border-rose-700/50 bg-rose-950/30 text-rose-200"
+                : banner.tone === "warn"
+                  ? "border-amber-700/50 bg-amber-950/30 text-amber-200"
+                  : "border-slate-700/60 bg-slate-800/50 text-slate-300",
+            ].join(" ")}
+          >
+            <p className="font-semibold text-xs">
+              {banner.tone === "error" ? "⚠ " : banner.tone === "warn" ? "◐ " : "○ "}
+              {banner.title}
+            </p>
+            {banner.detail && <p className="mt-0.5 opacity-90">{banner.detail}</p>}
+          </div>
+        )}
+
         {/* Matrix summary + inspection toggles */}
         <div className="rounded-lg border border-slate-800/80 bg-[#0b0f17] p-3 space-y-2.5">
           <div className="flex items-center justify-between gap-2 flex-wrap">

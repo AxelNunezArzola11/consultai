@@ -435,6 +435,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           approvalStatus: approval?.decision ?? (proposal?.status ?? "not_required"),
           approvalId: approval?.id ?? null,
           decidedBy: approval?.decidedBy ?? proposal?.decidedBy ?? null,
+          payoutFailureReason: pay.payoutFailureReason ?? null,
           paypalOrderId: pay.paypalOrderId ?? ms?.paypalOrderId ?? "—",
           paypalCaptureId: pay.paypalCaptureId ?? ms?.paypalCaptureId ?? "—",
           paypalPayoutBatchId: pay.paypalPayoutBatchId ?? ms?.paypalPayoutBatchId ?? "—",

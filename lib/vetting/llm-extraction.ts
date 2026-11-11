@@ -143,6 +143,50 @@ export function verifyQuotedExcerpts(
 }
 
 // ---------------------------------------------------------------------------
+// Requirement-id normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize an LLM-emitted requirement id against the known ids for this run.
+ *
+ * The prompt shows ids as `id="skill-1"`, but models sometimes emit
+ * variants (`skill_1`, `SKILL-1`, `req-1`, or a bare `1`). Without
+ * normalization those matches are silently dropped by the known-id filter,
+ * producing zero signals (and a 0 score) even when the model found evidence.
+ *
+ * Returns the canonical known id, or null when the value cannot be mapped.
+ * Mapping is conservative: bare integers map to `skill-N` only because this
+ * pipeline generates ids in exactly that form.
+ */
+export function normalizeRequirementId(
+  raw: string,
+  knownIds: ReadonlySet<string> | readonly string[]
+): string | null {
+  const known: ReadonlySet<string> =
+    knownIds instanceof Set ? knownIds : new Set(knownIds);
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (known.has(trimmed)) return trimmed;
+
+  const dashed = trimmed.toLowerCase().replace(/[\s_]+/g, "-");
+  if (known.has(dashed)) return dashed;
+
+  const bareNumber = /^(\d{1,3})$/.exec(dashed);
+  if (bareNumber) {
+    const mapped = `skill-${bareNumber[1]}`;
+    if (known.has(mapped)) return mapped;
+  }
+
+  const prefixed = /^(?:skill|req|requirement)-(\d{1,3})$/.exec(dashed);
+  if (prefixed) {
+    const mapped = `skill-${prefixed[1]}`;
+    if (known.has(mapped)) return mapped;
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Signal builder
 // ---------------------------------------------------------------------------
 
@@ -258,14 +302,26 @@ export async function extractSignals(input: ExtractionInput): Promise<Extraction
     const verified = verifyQuotedExcerpts(object.matches, content);
     const fabricatedDropped = beforeVerify - verified.length;
 
-    // Filter to only known requirements
+    // Filter to only known requirements (normalizing common LLM id
+    // variants first so valid evidence is never silently dropped).
     const knownReqIds = new Set(requirements.map((r) => r.id));
-    const filtered = verified.filter((m) => knownReqIds.has(m.requirementId));
-
-    // Build signals from verified matches
-    const signals = filtered.map((match) =>
-      buildSignal(match, candidateId, signalType, sourceUrl, contentHash)
-    );
+    const signals: Signal[] = [];
+    for (const match of verified) {
+      const canonicalId = normalizeRequirementId(
+        match.requirementId,
+        knownReqIds
+      );
+      if (!canonicalId) continue;
+      signals.push(
+        buildSignal(
+          { ...match, requirementId: canonicalId },
+          candidateId,
+          signalType,
+          sourceUrl,
+          contentHash
+        )
+      );
+    }
 
     return {
       signals,

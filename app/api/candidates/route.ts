@@ -134,6 +134,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       canDo: null,
       cannotDo: null,
       vettingSummary: null,
+      vettingDiagnostics: null,
       rank: t.candidates.filter((c) => c.projectId === projectId).length + 1,
       status: "pending" as const,
       rejectionReason: null,

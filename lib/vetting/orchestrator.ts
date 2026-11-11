@@ -21,12 +21,18 @@
 import { db } from "@/lib/db";
 import { candidates, signals as signalsTable } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/db/audit";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
-import { fetchGitHubRepo, fetchGitHubPrFiles, fetchGitHubRepos } from "./github-fetcher";
+import {
+  fetchGitHubRepo,
+  fetchGitHubPrFiles,
+  fetchGitHubRepos,
+  rankReposForVetting,
+} from "./github-fetcher";
 import { safeFetch, validateUrl, LinkedInBlockedError, SsrfBlockedError } from "./ssrf-safe-fetch";
 import { extractSignals } from "./llm-extraction";
 import { computeTrustScore, buildMatrix, buildScoreBreakdown, type Signal } from "./signals";
+import type { VettingDiagnostics } from "./diagnostics";
 
 export interface VettingInput {
   candidateId: string;
@@ -67,6 +73,52 @@ export interface VettingOutput {
   usedFallback: boolean;
   /** Debug payload — requirements sent to LLM, raw LLM output per source */
   debugLog: DebugEntry[];
+  /** Persisted per-run diagnostics (also stored on the candidate row) */
+  diagnostics: VettingDiagnostics;
+}
+
+/**
+ * Map with bounded concurrency, preserving input order in the output.
+ *
+ * Vetting uses a limit of 2: fully serial analysis exceeds the 60s
+ * serverless limit, while fully concurrent analysis bursts past Groq's
+ * per-minute input-token quota (429s). Two at a time keeps a 5-repo run
+ * around 10–20s with a small token burst.
+ */
+export async function mapWithConcurrencyLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await fn(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Self-healing bootstrap for the `vetting_diagnostics` column (migration
+ * 0011). Idempotent `ADD COLUMN IF NOT EXISTS`, so concurrent vetting runs
+ * are safe. Best-effort: a failure here never breaks the vetting run —
+ * diagnostics persistence is skipped instead (see step 8b).
+ */
+async function ensureVettingDiagnosticsColumn(): Promise<boolean> {
+  try {
+    await db.execute(
+      sql`ALTER TABLE "candidates" ADD COLUMN IF NOT EXISTS "vetting_diagnostics" jsonb`
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,65 +173,111 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
   }
 
   // 4. GitHub profile + repos (with README and config file content)
+  // Per-repo analysis runs at bounded concurrency (2): fully serial runs
+  // exceed the 60s serverless limit (observed 57s+), while unbounded
+  // concurrency bursts past Groq's per-minute token quota (429s).
+  // Results merge in rank order afterwards, so signals/debug/errors stay
+  // deterministic regardless of completion order.
+  const reposAnalyzed: string[] = [];
   if (candidate.githubHandle) {
     try {
       const reposResult = await fetchGitHubRepos(candidate.githubHandle);
-      // Process top 5 most-recently-updated repos
-      for (const repoSummary of reposResult.data.slice(0, 5)) {
-        const sourceUrl = repoSummary.htmlUrl;
-        const [owner, repoName] = repoSummary.fullName.split("/");
+      // Warn when the GitHub quota is nearly exhausted — remaining sources
+      // in this run may fail and scores may be incomplete until reset.
+      const quota = reposResult.rateLimit;
+      if (quota && quota.limit > 0 && quota.remaining / quota.limit < 0.1) {
+        errors.push(
+          `GitHub API quota low (${quota.remaining}/${quota.limit} remaining) — results may be incomplete until reset.`
+        );
+      }
+      // Analyze the most prominent repos (stars → forks → recency), not the
+      // most recently touched ones, so substantial work is actually examined.
+      const rankedRepos = rankReposForVetting(reposResult.data);
+      reposAnalyzed.push(...rankedRepos.map((r) => r.fullName));
 
-        // Fetch full repo detail: README + languages + config files
-        let repoDetail;
-        try {
-          const detailResult = await fetchGitHubRepo(owner, repoName);
-          repoDetail = detailResult.data;
-        } catch (fetchErr) {
-          // If detailed fetch fails, fall back to summary-only metadata
-          errors.push(
-            `GitHub repo detail fetch failed for ${repoSummary.fullName}: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`
-          );
-          repoDetail = null;
-        }
+      const analyzed = await mapWithConcurrencyLimit(
+        rankedRepos,
+        2,
+        async (repoSummary) => {
+          const sourceUrl = repoSummary.htmlUrl;
+          const [owner, repoName] = repoSummary.fullName.split("/");
+          try {
+            // Fetch full repo detail: README + languages + config files
+            let repoDetail;
+            let detailError: string | null = null;
+            try {
+              const detailResult = await fetchGitHubRepo(owner, repoName);
+              repoDetail = detailResult.data;
+            } catch (fetchErr) {
+              // If detailed fetch fails, fall back to summary-only metadata
+              detailError =
+                `GitHub repo detail fetch failed for ${repoSummary.fullName}: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`;
+              repoDetail = null;
+            }
 
-        // Build rich content for the LLM
-        const contentParts: string[] = [
-          `Repository: ${repoSummary.fullName}`,
-          repoSummary.description ? `Description: ${repoSummary.description}` : "",
-          `Language: ${repoSummary.language ?? "unknown"}`,
-          `Topics: ${repoSummary.topics.join(", ")}`,
-          `Stars: ${repoSummary.stargazersCount}`,
-        ];
+            // Build rich content for the LLM
+            const contentParts: string[] = [
+              `Repository: ${repoSummary.fullName}`,
+              repoSummary.description ? `Description: ${repoSummary.description}` : "",
+              `Language: ${repoSummary.language ?? "unknown"}`,
+              `Topics: ${repoSummary.topics.join(", ")}`,
+              `Stars: ${repoSummary.stargazersCount}`,
+            ];
 
-        if (repoDetail) {
-          // Languages breakdown
-          const langEntries = Object.entries(repoDetail.languages)
-            .sort(([, a], [, b]) => b - a)
-            .map(([lang, bytes]) => `${lang}: ${bytes}`)
-            .join(", ");
-          if (langEntries) contentParts.push(`Languages (bytes): ${langEntries}`);
+            if (repoDetail) {
+              // Languages breakdown
+              const langEntries = Object.entries(repoDetail.languages)
+                .sort(([, a], [, b]) => b - a)
+                .map(([lang, bytes]) => `${lang}: ${bytes}`)
+                .join(", ");
+              if (langEntries) contentParts.push(`Languages (bytes): ${langEntries}`);
 
-          // README
-          if (repoDetail.readme) {
-            contentParts.push("", "--- README ---", repoDetail.readme);
+              // README
+              if (repoDetail.readme) {
+                contentParts.push("", "--- README ---", repoDetail.readme);
+              }
+
+              // Config / dependency files
+              for (const [filename, fileContent] of Object.entries(repoDetail.configFiles)) {
+                contentParts.push("", `--- ${filename} ---`, fileContent);
+              }
+            }
+
+            const content = contentParts.filter(Boolean).join("\n");
+
+            const result = await extractSignals({
+              candidateId,
+              signalType: "github_repo",
+              sourceUrl,
+              content,
+              requirements,
+            });
+
+            return { repoSummary, sourceUrl, detailError, result };
+          } catch (err) {
+            // Never let one repo fail the whole run.
+            return {
+              repoSummary,
+              sourceUrl,
+              detailError: null as string | null,
+              result: {
+                signals: [],
+                contentHash: "",
+                fabricatedDropped: 0,
+                usedFallback: false as boolean,
+                error: `GitHub repo ${repoSummary.name}: ${err instanceof Error ? err.message : String(err)}`,
+                debugPrompt: undefined as string | undefined,
+                debugLlmOutput: undefined as unknown,
+                debugRawText: undefined as string | undefined,
+              },
+            };
           }
-
-          // Config / dependency files
-          for (const [filename, fileContent] of Object.entries(repoDetail.configFiles)) {
-            contentParts.push("", `--- ${filename} ---`, fileContent);
-          }
         }
+      );
 
-        const content = contentParts.filter(Boolean).join("\n");
-
-        const result = await extractSignals({
-          candidateId,
-          signalType: "github_repo",
-          sourceUrl,
-          content,
-          requirements,
-        });
-
+      // Merge in rank order (mapWithConcurrencyLimit preserves input order).
+      for (const { repoSummary, sourceUrl, detailError, result } of analyzed) {
+        if (detailError) errors.push(detailError);
         fabricatedDropped += result.fabricatedDropped;
         if (result.usedFallback) usedFallback = true;
         allSignals.push(...result.signals);
@@ -386,6 +484,27 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
     throw new Error(`DB update failed for candidate ${candidateId}: ${detail}`);
   }
 
+  // 8b. Persist per-run diagnostics (best-effort, never breaks the run).
+  // Explains the score — especially 0 — on the vetting card afterwards.
+  const diagnostics: VettingDiagnostics = {
+    ranAt: new Date().toISOString(),
+    signalCount: allSignals.length,
+    usedFallback,
+    fabricatedDropped,
+    reposAnalyzed,
+    errors: errors.slice(-10),
+  };
+  if (await ensureVettingDiagnosticsColumn()) {
+    try {
+      await db
+        .update(candidates)
+        .set({ vettingDiagnostics: diagnostics })
+        .where(eq(candidates.id, candidateId));
+    } catch {
+      // Diagnostics are observability only — the run already succeeded.
+    }
+  }
+
   // 9. Audit log
   await writeAuditLog({
     entityType: "candidate",
@@ -411,5 +530,6 @@ export async function runVetting(input: VettingInput): Promise<VettingOutput> {
     fabricatedDropped,
     usedFallback,
     debugLog,
+    diagnostics,
   };
 }

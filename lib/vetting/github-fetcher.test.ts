@@ -16,11 +16,14 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  configFilesForLanguage,
   fetchGitHubRepo,
   fetchGitHubPrFiles,
+  rankReposForVetting,
   GitHubNotFoundError,
   GitHubRateLimitError,
   GitHubValidationError,
+  type GitHubRepoSummary,
 } from "./github-fetcher";
 
 // ---------------------------------------------------------------------------
@@ -295,5 +298,110 @@ describe("fetchGitHubRepo — truncation", () => {
 
     const result = await fetchGitHubRepo("user", "my-repo");
     expect(result.data.configFiles["package.json"].length).toBeLessThanOrEqual(1500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rankReposForVetting — prominence order, not recency order
+// ---------------------------------------------------------------------------
+
+describe("rankReposForVetting", () => {
+  function repo(
+    name: string,
+    stars: number,
+    forks = 0,
+    pushedAt = "2024-01-01T00:00:00Z"
+  ): GitHubRepoSummary {
+    return {
+      name,
+      fullName: `user/${name}`,
+      description: null,
+      language: "TypeScript",
+      stargazersCount: stars,
+      forksCount: forks,
+      topics: [],
+      isArchived: false,
+      isFork: false,
+      createdAt: "2023-01-01T00:00:00Z",
+      updatedAt: pushedAt,
+      pushedAt,
+      htmlUrl: `https://github.com/user/${name}`,
+      defaultBranch: "main",
+    };
+  }
+
+  it("ranks by stars desc so substantial work is analyzed first", () => {
+    const repos = [
+      repo("trivial-recent", 2, 0, "2026-11-01T00:00:00Z"),
+      repo("flagship", 5000, 100, "2020-01-01T00:00:00Z"),
+      repo("mid", 120, 5, "2023-01-01T00:00:00Z"),
+    ];
+    const ranked = rankReposForVetting(repos);
+    expect(ranked.map((r) => r.name)).toEqual([
+      "flagship",
+      "mid",
+      "trivial-recent",
+    ]);
+  });
+
+  it("breaks star ties by forks, then by recency", () => {
+    const repos = [
+      repo("older", 10, 1, "2024-01-01T00:00:00Z"),
+      repo("newer", 10, 1, "2025-01-01T00:00:00Z"),
+      repo("forked", 10, 50, "2020-01-01T00:00:00Z"),
+    ];
+    const ranked = rankReposForVetting(repos);
+    expect(ranked.map((r) => r.name)).toEqual([
+      "forked",
+      "newer",
+      "older",
+    ]);
+  });
+
+  it("returns at most 5 repos by default", () => {
+    const repos = Array.from({ length: 12 }, (_, i) =>
+      repo(`r${i}`, 100 - i)
+    );
+    expect(rankReposForVetting(repos)).toHaveLength(5);
+    expect(rankReposForVetting(repos)[0].name).toBe("r0");
+  });
+
+  it("does not mutate the input array", () => {
+    const repos = [repo("b", 1), repo("a", 99)];
+    rankReposForVetting(repos);
+    expect(repos.map((r) => r.name)).toEqual(["b", "a"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// configFilesForLanguage — quota-saving targeted fetching
+// ---------------------------------------------------------------------------
+
+describe("configFilesForLanguage", () => {
+  it("fetches JS/TS dependency files for JavaScript/TypeScript repos", () => {
+    expect(configFilesForLanguage("TypeScript")).toContain("package.json");
+    expect(configFilesForLanguage("JavaScript")).toContain("package.json");
+    expect(configFilesForLanguage("TypeScript")).not.toContain("Cargo.toml");
+  });
+
+  it("fetches Python manifests for Python repos", () => {
+    expect(configFilesForLanguage("Python")).toEqual([
+      "requirements.txt",
+      "pyproject.toml",
+    ]);
+  });
+
+  it("fetches single manifests for Rust/Go/PHP", () => {
+    expect(configFilesForLanguage("Rust")).toEqual(["Cargo.toml"]);
+    expect(configFilesForLanguage("Go")).toEqual(["go.mod"]);
+    expect(configFilesForLanguage("PHP")).toEqual(["composer.json"]);
+  });
+
+  it("keeps the full candidate list for unknown languages (no silent drop)", () => {
+    const all = configFilesForLanguage(null);
+    expect(all).toContain("package.json");
+    expect(all).toContain("Cargo.toml");
+    expect(all.length).toBeGreaterThan(3);
+    expect(configFilesForLanguage("Brainfuck")).toEqual(all);
   });
 });

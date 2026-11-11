@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { lazyExpireNdas, lazyCheckNoShows } from "@/lib/scheduling/lazy-checks";
 import { NdaGenerateButton } from "@/components/candidates/NdaGenerateButton";
+import { HireConsultantButton } from "@/components/candidates/HireConsultantButton";
 import { CandidateDemoControls } from "@/components/candidates/CandidateDemoControls";
 import { PipelinePoller } from "@/components/candidates/PipelinePoller";
 import { isDemoMode } from "@/lib/demo/config";
@@ -418,6 +419,16 @@ function CandidateCard({
             projectId={projectId}
             candidateName={candidate.name}
             label="Get / Reissue Invite Link"
+          />
+        </div>
+      )}
+      {(candidate.status === "booking_unlocked" ||
+        candidate.status === "meeting_held") && (
+        <div className="pt-1">
+          <HireConsultantButton
+            candidateId={candidate.id}
+            projectId={projectId}
+            candidateName={candidate.name}
           />
         </div>
       )}

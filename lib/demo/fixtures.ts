@@ -319,6 +319,7 @@ export function buildDemoTables(): DemoTables {
       vettingSummary:
         "Lead frontend consultant. Strong realtime-dashboard evidence. Availability 20h/week; " +
         "currently at capacity (contractor constraint) until the reschedule lands.",
+      vettingDiagnostics: null,
       rank: 1,
       status: "selected",
       rejectionReason: null,
@@ -342,6 +343,7 @@ export function buildDemoTables(): DemoTables {
       cannotDo: [{ skill: "Mobile development", reason: "No mobile evidence found" }],
       vettingSummary:
         "Backend consultant owning the event pipeline and billing webhooks. Availability 30h/week; workload healthy.",
+      vettingDiagnostics: null,
       rank: 2,
       status: "nda_signed",
       rejectionReason: null,
@@ -368,6 +370,7 @@ export function buildDemoTables(): DemoTables {
       ],
       vettingSummary:
         "QA consultant shortlisted for the test phase. Availability 25h/week starting next sprint.",
+      vettingDiagnostics: null,
       rank: 3,
       status: "shortlisted",
       rejectionReason: null,
@@ -483,6 +486,7 @@ export function buildDemoTables(): DemoTables {
       netUsd: "3843.70",
       currency: "USD",
       payoutFeeUsd: "0.25",
+      payoutFailureReason: null,
       paypalOrderId: "DEMO-ORDER-REQ-001",
       paypalCaptureId: "DEMO-CAPTURE-REQ-001",
       paypalPayoutBatchId: "DEMO-PAYOUT-REQ-001",
@@ -504,6 +508,7 @@ export function buildDemoTables(): DemoTables {
       netUsd: "4324.20",
       currency: "USD",
       payoutFeeUsd: null,
+      payoutFailureReason: null,
       paypalOrderId: "DEMO-ORDER-INT-001",
       paypalCaptureId: "DEMO-CAPTURE-INT-001",
       paypalPayoutBatchId: null,

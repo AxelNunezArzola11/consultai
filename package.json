@@ -13,6 +13,7 @@
     "db:studio": "drizzle-kit studio",
     "seed": "tsx lib/seed/demo-data.ts",
     "seed:vetting": "tsx lib/seed/seed-vetting-signals.ts",
+    "provision:demo-users": "tsx lib/seed/provision-demo-users.ts",
     "migrate:0005": "tsx lib/db/migrations/run-0005.ts",
     "test": "vitest run",
     "test:watch": "vitest"

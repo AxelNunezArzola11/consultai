@@ -319,6 +319,7 @@ function getColumnDefsForTab(
       { field: "grossUsd", headerName: "Gross Capture", width: 135, filter: "agNumberColumnFilter", cellRenderer: UsdCurrencyRenderer },
       { field: "feeUsd", headerName: "Platform/PP Fee", width: 135, filter: "agNumberColumnFilter", cellRenderer: UsdCurrencyRenderer },
       { field: "netUsd", headerName: "Net Payout", width: 135, filter: "agNumberColumnFilter", cellRenderer: UsdCurrencyRenderer },
+      { field: "payoutFailureReason", headerName: "Failure Reason", minWidth: 220, flex: 1, filter: "agTextColumnFilter" },
       { field: "paypalOrderId", headerName: "PayPal Order ID", width: 165, filter: "agTextColumnFilter" },
       { field: "paypalPayoutBatchId", headerName: "PayPal Batch ID", width: 165, filter: "agTextColumnFilter" },
     ]);
@@ -367,6 +368,7 @@ const DETAIL_ALLOWLIST: Record<OperationsGridTab, Set<string>> = {
   payments: new Set([
     "id", "milestoneTitle", "projectTitle", "status",
     "approvalStatus", "grossUsd", "feeUsd", "netUsd",
+    "payoutFailureReason",
   ]),
   executions: new Set([
     "id", "intent", "delegatedAgents", "status", "approvalStatus",

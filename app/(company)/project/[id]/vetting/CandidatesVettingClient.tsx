@@ -11,6 +11,8 @@ import type { SimulationCandidate } from "@/components/vetting/ScenarioSimulatio
 import { buildMatrix, buildScoreBreakdown, type Signal, type MatrixEntry } from "@/lib/vetting/signals";
 import type { ScoreBreakdown } from "@/lib/vetting/signals";
 import { normalizeGithubHandle, normalizeCandidateSearchQuery } from "@/lib/vetting/github-handle";
+import { vettingRunFeedback } from "@/lib/vetting/run-feedback";
+import { parseVettingDiagnostics, type VettingDiagnostics } from "@/lib/vetting/diagnostics";
 
 interface CandidateRow {
   id: string;
@@ -23,6 +25,7 @@ interface CandidateRow {
   trustScore: number | null;
   vettingConsentAt: string | null;
   vettingRanAt: string | null;
+  vettingDiagnostics: VettingDiagnostics | null;
   canDo: Array<{ skill: string; state: string; evidenceSummary: string | null }> | null;
   cannotDo: Array<{ skill: string }> | null;
 }
@@ -61,6 +64,7 @@ export function CandidatesVettingClient({
     scoreBreakdown: ScoreBreakdown;
     matrix: MatrixEntry[];
     signals: Signal[];
+    diagnostics: VettingDiagnostics | null;
     debugPayload?: unknown;
   }>>({});
 
@@ -135,6 +139,7 @@ export function CandidatesVettingClient({
       trustScore: returnedCandidate?.trustScore ?? null,
       vettingConsentAt: new Date().toISOString(),
       vettingRanAt: null,
+      vettingDiagnostics: null,
       canDo: null,
       cannotDo: null,
     };
@@ -169,12 +174,19 @@ export function CandidatesVettingClient({
       trustScore: number;
       scoreBreakdown: ScoreBreakdown;
       matrix: MatrixEntry[];
+      signalCount?: number;
       usedFallback?: boolean;
       errors?: string[];
+      diagnostics?: unknown;
     };
 
-    if (data.usedFallback && data.errors && data.errors.length > 0) {
-      toast.error(`LLM unavailable — scores will be 0. Reason: ${data.errors[0]}`, { id: "add-candidate" });
+    const feedback = vettingRunFeedback({
+      signalCount: data.signalCount,
+      usedFallback: data.usedFallback,
+      errors: data.errors,
+    });
+    if (feedback.kind === "empty") {
+      toast.error(feedback.message, { id: "add-candidate" });
     } else {
       toast.success(`Vetting complete for @${canonicalHandle}`, { id: "add-candidate" });
     }
@@ -186,6 +198,7 @@ export function CandidatesVettingClient({
         scoreBreakdown: data.scoreBreakdown as ScoreBreakdown,
         matrix: data.matrix as MatrixEntry[],
         signals: (data.matrix as MatrixEntry[]).flatMap((e) => e.signals),
+        diagnostics: parseVettingDiagnostics(data.diagnostics),
       },
     }));
     setVettingStatus((s) => ({ ...s, [candidateId]: "done" }));
@@ -222,13 +235,20 @@ export function CandidatesVettingClient({
       trustScore: number;
       scoreBreakdown: ScoreBreakdown;
       matrix: MatrixEntry[];
+      signalCount?: number;
       usedFallback?: boolean;
       errors?: string[];
+      diagnostics?: unknown;
       debugPayload?: unknown;
     };
 
-    if (data.usedFallback && data.errors && data.errors.length > 0) {
-      toast.error(`LLM unavailable — scores will be 0. Reason: ${data.errors[0]}`);
+    const feedback = vettingRunFeedback({
+      signalCount: data.signalCount,
+      usedFallback: data.usedFallback,
+      errors: data.errors,
+    });
+    if (feedback.kind === "empty") {
+      toast.error(feedback.message);
     }
 
     setCandidateData((prev) => ({
@@ -238,6 +258,7 @@ export function CandidatesVettingClient({
         scoreBreakdown: data.scoreBreakdown,
         matrix: data.matrix,
         signals: data.matrix.flatMap((e: MatrixEntry) => e.signals),
+        diagnostics: parseVettingDiagnostics(data.diagnostics),
         debugPayload: data.debugPayload,
       },
     }));
@@ -266,6 +287,7 @@ export function CandidatesVettingClient({
       scoreBreakdown,
       matrix,
       signals: sigs,
+      diagnostics: c.vettingDiagnostics,
       debugPayload: undefined as unknown,
     };
   }
@@ -750,6 +772,7 @@ export function CandidatesVettingClient({
                       scoreBreakdown={vettingData.scoreBreakdown}
                       matrix={vettingData.matrix}
                       signals={vettingData.signals}
+                      diagnostics={vettingData.diagnostics}
                       humanReviewNotice={humanReviewNotice}
                       scoringFormula={scoringFormula}
                       isShortlisted={c.status === "shortlisted"}

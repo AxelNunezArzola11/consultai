@@ -5,6 +5,8 @@
  *
  *   FOUND → SHORTLISTED → NDA_SENT → NDA_SIGNED → BOOKING_UNLOCKED
  *         → BOOKED → MEETING_HELD → SELECTED
+ *         (direct hire: BOOKING_UNLOCKED → SELECTED skips the meeting leg
+ *         when the company hires without a Cal booking)
  *
  * Terminal / side states:
  *   DECLINED, EXPIRED, CANCELLED, NO_SHOW, INVALID_BOOKING, REJECTED, CASCADED
@@ -73,7 +75,9 @@ const CANDIDATE_TRANSITIONS: Record<CandidateStatus, ReadonlySet<CandidateStatus
   shortlisted:     cs("nda_sent", "rejected"),
   nda_sent:        cs("nda_signed", "declined", "expired"),
   nda_signed:      cs("booking_unlocked"),
-  booking_unlocked: cs("booked", "cancelled"),
+  // booking_unlocked → selected: direct hire without a Cal meeting
+  // (company decision; the booked → meeting_held path stays canonical).
+  booking_unlocked: cs("booked", "selected", "cancelled"),
   booked:          cs("meeting_held", "no_show", "cancelled", "invalid_booking"),
   meeting_held:    cs("selected", "rejected"),
   selected:        cs(), // terminal — project moves forward

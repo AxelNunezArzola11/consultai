@@ -19,6 +19,7 @@ import { eq, sql, inArray, and, ilike, or } from "drizzle-orm";
 import { CandidatesVettingClient } from "./CandidatesVettingClient";
 import { VettingAIHarness } from "@/components/agent/VettingAIHarness";
 import { requirementsFromProject } from "@/lib/vetting/requirements-from-project";
+import { parseVettingDiagnostics } from "@/lib/vetting/diagnostics";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
 import { normalizeCandidateSearchQuery } from "@/lib/vetting/github-handle";
@@ -160,6 +161,7 @@ export default async function CandidatesVettingPage({ params, searchParams }: Pr
         trustScore: c.trustScore ? parseFloat(c.trustScore) : null,
         vettingConsentAt: c.vettingConsentAt?.toISOString() ?? null,
         vettingRanAt: c.vettingRanAt?.toISOString() ?? null,
+        vettingDiagnostics: parseVettingDiagnostics(c.vettingDiagnostics),
         canDo: c.canDo as Array<{ skill: string; state: string; evidenceSummary: string | null }> | null,
         cannotDo: c.cannotDo as Array<{ skill: string }> | null,
       }))}

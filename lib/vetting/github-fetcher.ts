@@ -46,6 +46,37 @@ const CONFIG_FILE_CANDIDATES = [
   "composer.json",
 ] as const;
 
+/**
+ * Pick dependency/config filenames worth fetching for a repo, given its
+ * primary language. Fetching all 8 candidates for every repo burns ~40
+ * GitHub API requests per vetted candidate (5 repos), which exhausts the
+ * 60 req/hr anonymous quota almost immediately on shared serverless IPs and
+ * yields rate-limit failures (and 0 scores). Language-targeted fetching
+ * cuts that to 1–3 files per repo.
+ *
+ * Repos with an unlisted/unknown primary language keep the full list so no
+ * evidence source is silently dropped on the ambiguous path.
+ */
+export function configFilesForLanguage(
+  language: string | null
+): readonly string[] {
+  switch ((language ?? "").toLowerCase()) {
+    case "javascript":
+    case "typescript":
+      return ["package.json", "next.config.js", "next.config.ts"];
+    case "python":
+      return ["requirements.txt", "pyproject.toml"];
+    case "rust":
+      return ["Cargo.toml"];
+    case "go":
+      return ["go.mod"];
+    case "php":
+      return ["composer.json"];
+    default:
+      return CONFIG_FILE_CANDIDATES;
+  }
+}
+
 export interface GitHubUserProfile {
   login: string;
   id: number;
@@ -161,8 +192,17 @@ async function githubGet<T>(
   }
   if (response.status === 403 || response.status === 429) {
     const rateLimit = parseRateLimit(response.headers);
+    const resetHuman =
+      typeof rateLimit?.reset === "number" && Number.isFinite(rateLimit.reset)
+        ? new Date(rateLimit.reset * 1000).toISOString()
+        : "unknown";
+    const authenticated = Boolean(
+      process.env.GITHUB_TOKEN || process.env.GITHUB_PAT
+    );
     throw new GitHubRateLimitError(
-      `GitHub rate limit exceeded. Resets at: ${rateLimit?.reset ?? "unknown"}`,
+      authenticated
+        ? `GitHub rate limit exceeded. Resets at: ${resetHuman}.`
+        : `GitHub rate limit exceeded (anonymous quota is shared and exhausts quickly on serverless). Resets at: ${resetHuman}. Set GITHUB_TOKEN for 5000 req/hr.`,
       rateLimit
     );
   }
@@ -244,11 +284,18 @@ export async function fetchGitHubRepo(
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const [repoResult, readmeResult, languagesResult] = await Promise.allSettled([
-      githubGet<Record<string, unknown>>(
-        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
-        ac.signal
-      ),
+    // Repo metadata first: the primary language selects which config files
+    // are worth fetching (quota saver — see configFilesForLanguage).
+    const repoResult = await githubGet<Record<string, unknown>>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+      ac.signal
+    );
+
+    const summary = mapRepo(repoResult.data);
+    const rateLimit = repoResult.rateLimit;
+    const etag = repoResult.etag;
+
+    const [readmeResult, languagesResult] = await Promise.allSettled([
       githubGet<Record<string, unknown>>(
         `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/readme`,
         ac.signal
@@ -258,12 +305,6 @@ export async function fetchGitHubRepo(
         ac.signal
       ),
     ]);
-
-    if (repoResult.status === "rejected") throw repoResult.reason;
-
-    const summary = mapRepo(repoResult.value.data);
-    const rateLimit = repoResult.value.rateLimit;
-    const etag = repoResult.value.etag;
 
     let readme: string | null = null;
     if (readmeResult.status === "fulfilled") {
@@ -279,8 +320,9 @@ export async function fetchGitHubRepo(
 
     // Fetch key config/dependency files in parallel (best-effort; 404s are skipped)
     const configFiles: Record<string, string> = {};
+    const configTargets = configFilesForLanguage(summary.language);
     const configResults = await Promise.allSettled(
-      CONFIG_FILE_CANDIDATES.map((filename) =>
+      configTargets.map((filename) =>
         githubGet<Record<string, unknown>>(
           `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${filename}`,
           ac.signal
@@ -340,6 +382,45 @@ export async function fetchGitHubPrFiles(
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Repo ranking for vetting
+// ---------------------------------------------------------------------------
+
+export const VETTING_REPO_LIMIT = 5;
+
+/**
+ * Rank a candidate's repos by prominence for vetting analysis.
+ *
+ * The GitHub list endpoint returns repos sorted by recent activity, so a
+ * naive "first N" slice often analyzes trivial recently-touched repos
+ * (dotfiles, forks, mirrors) while the candidate's substantial work goes
+ * unexamined —
+ * which yields zero evidence and a 0 score for strong candidates.
+ *
+ * Ranking (stable, deterministic):
+ *   1. stargazersCount desc (community-validated substance)
+ *   2. forksCount desc
+ *   3. pushedAt desc (recent activity breaks ties)
+ *
+ * Returns at most `limit` repos. Pure function — no network.
+ */
+export function rankReposForVetting(
+  repos: GitHubRepoSummary[],
+  limit: number = VETTING_REPO_LIMIT
+): GitHubRepoSummary[] {
+  return [...repos]
+    .sort((a, b) => {
+      if (b.stargazersCount !== a.stargazersCount) {
+        return b.stargazersCount - a.stargazersCount;
+      }
+      if (b.forksCount !== a.forksCount) {
+        return b.forksCount - a.forksCount;
+      }
+      return b.pushedAt.localeCompare(a.pushedAt);
+    })
+    .slice(0, Math.max(0, limit));
 }
 
 // ---------------------------------------------------------------------------

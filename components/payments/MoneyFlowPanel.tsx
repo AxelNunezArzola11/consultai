@@ -57,6 +57,7 @@ interface PaymentSummary {
   feeUsd:      string | null;
   netUsd:      string | null;
   payoutFeeUsd: string | null;
+  payoutFailureReason: string | null;
 }
 
 interface MilestoneState {
@@ -169,10 +170,8 @@ export function MoneyFlowPanel({
   const [auditOpen, setAuditOpen]         = useState(false);
 
   const prevStatusRef = useRef(initialStatus);
-  const stageRef      = useRef<Stage>(statusToStage(initialStatus));
 
   const stage = statusToStage(state.status);
-  stageRef.current = stage;
 
   // ── Poll ──────────────────────────────────────────────────────────────────
   // Consecutive error counter for back-off — resets on success
@@ -226,8 +225,15 @@ export function MoneyFlowPanel({
   }, [milestoneId]);
 
   useEffect(() => {
-    // Only poll when not in a terminal state
-    if (TERMINAL.includes(stage)) return;
+    // Terminal states stop the interval — but still fetch once on mount so
+    // a page opened on failed/returned loads the payment row, the failure
+    // reason, and the audit trail instead of rendering empty. Deferred to
+    // a callback (same as the interval below) so the effect body itself
+    // never calls setState synchronously.
+    if (TERMINAL.includes(stage)) {
+      const id = setTimeout(() => { void poll(); }, 0);
+      return () => clearTimeout(id);
+    }
 
     // Use exponential back-off when errors accumulate (max 30 s)
     const effectivePollMs =
@@ -409,14 +415,24 @@ export function MoneyFlowPanel({
 
         {/* Failed / returned message */}
         {stage === "failed" && (
-          <p className="text-xs text-destructive mt-2">
-            The payout failed. Contact support or retry funding.
-          </p>
+          <div className="mt-2 space-y-1">
+            <p className="text-xs text-destructive">
+              The payout failed. {state.payment?.payoutFailureReason ?? "Contact support for the PayPal error detail."}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Funds are still held from the original capture — retry from the Approvals queue.
+            </p>
+          </div>
         )}
         {stage === "returned" && (
-          <p className="text-xs text-amber-600 dark:text-amber-400 mt-2">
-            Funds returned — the consultant's PayPal account may be unregistered.
-          </p>
+          <div className="mt-2 space-y-1">
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              Funds returned{state.payment?.payoutFailureReason ? ` — ${state.payment.payoutFailureReason}` : " — the consultant's PayPal account may be unregistered."}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Retry from the Approvals queue once the receiver issue is fixed.
+            </p>
+          </div>
         )}
       </div>
 

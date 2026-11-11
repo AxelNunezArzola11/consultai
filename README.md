@@ -1,288 +1,104 @@
 # ConsultAI
 
-ConsultAI is an enterprise AI-powered project-management and **Pay on Delivery**
-platform. It combines AI-assisted project planning, consultant vetting,
-milestone-based delivery verification, and controlled payment workflows so that
-companies can manage work from brief through verified payout.
+**ConsultAI** is an enterprise **AI-powered project-management and Pay on Delivery** platform. It takes work from brief to verified payout: AI agents plan the project, vet consultants, verify milestone delivery against GitHub evidence, and release milestone payments through PayPal — with every financial step gated by deterministic policy checks and human approval.
 
-The application is built as a Next.js web platform. Its planning workspace
-combines a high-performance AG Grid backlog with a Bryntum Gantt scheduling
-engine, while server-side AI agents use Groq through the Vercel AI SDK.
+> **Stack at a glance:** Next.js 16 + React 19 + TypeScript · Python FastAPI multi-agent backend · Groq LLMs via the Vercel AI SDK · Neon Postgres (Drizzle ORM) · PayPal Sandbox · GitHub webhooks · Bryntum Gantt · AG Grid
 
-## Multi-Agent Architecture & Operational Modules (Argon 4 Upgrade)
+---
 
-ConsultAI implements a coordinated **PydanticAI + Pydantic Graph Multi-Agent Architecture** across both the Python FastAPI backend (`backend/`) and Next.js App Router (`lib/ai-ops/orchestrator-engine.ts`):
+## ⚠️ Important Testing Note (READ BEFORE TESTING)
 
-- **Central Supervisor Agent** (`backend/orchestrator/supervisor.py`, `backend/orchestrator/workflow.py`): Classifies user requests, selects specialist agents, passes structured context, validates outputs against deterministic policies, tracks token consumption and execution duration, and halts at Human Approval Gates for sensitive financial or schedule operations.
-- **5 Specialist Agents** (`backend/agents/`):
-  - **Planning Agent** (`backend/agents/planning.py`): Generates WBS task breakdowns, dependencies, timeline estimates, critical path, project risks, and Bryntum Gantt task structures.
-  - **Talent Agent** (`backend/agents/talent.py`): Evaluates consultant profiles and verifies real GitHub repository signals without fabricating verification evidence.
-  - **Delivery Agent** (`backend/agents/delivery.py`): Monitors deliverables, analyzes GitHub PR webhooks, evaluates acceptance criteria, and separates deterministic evidence from AI code assessments.
-  - **Finance Agent** (`backend/agents/finance.py`): Calculates milestone fee breakdowns, runs deterministic payment eligibility policies, and prepares human-gated `PaymentProposalModel` records.
-  - **Reschedule Agent** (`backend/agents/reschedule.py`): Analyzes project delays, propagates Finish-to-Start shifts across unlocked milestones, detects resource/dependency conflicts, and produces validated Bryntum scheduling proposals.
-- **6-Stage Financial Security Policy** (`backend/policies/payments.py`, `lib/payments/payment-chat-tools.ts`, `app/api/paypal/payout/route.ts`):
-  1. AI Payment Assessment (advisory only)
-  2. Deterministic Business-Rule Validation
-  3. Explicit Human Authorization (`company` or `admin` operator; AI can never independently authorize transfers or bypass approval)
-  4. Actual PayPal Transaction
-  5. Transaction Confirmation (`payout_batch_id`)
-  6. Persistent Append-Only Audit Record (`audit_log`)
-- **Enterprise Views**:
-  - **Company Dashboard**: `/dashboard`
-  - **Bryntum Gantt Project Planning**: `/planning`
-  - **AG Grid 7-Domain Enterprise Operations**: `/operations` (Consultants, Projects, Tasks, Companies, Contracts, Payments, Agent Executions)
-  - **AI Operations Center (with Live SSE)**: `/ai-ops`
-  - **Freelancer Consultant Portal**: `/freelancer` & `/demo-inbox`
-  - **Administrator Governance & Audit Center**: `/admin`
+> ### 🚨 CRITICAL — GitHub Milestone Verification
+>
+> **To successfully test the GitHub Milestone verification feature, you MUST register a NEW freelancer account in the app using the EXACT GitHub username that you will use to submit the Pull Request.**
+>
+> Delivery verification matches the Pull Request author against the freelancer's registered GitHub username. If the names differ, verification will fail.
 
-## Platform capabilities
+---
 
-- **AI-assisted project planning** — turn natural-language requests into
-  structured scheduling actions.
-- **Visual project planning** — manage work breakdown structures, dates,
-  durations, dependencies, progress, and critical paths in Bryntum Gantt.
-- **Unscheduled-task backlog** — review and drag tasks from AG Grid into the
-  project timeline.
-- **Consultant vetting** — collect evidence and calculate transparent trust
-  signals for candidate decisions.
-- **Delivery verification** — evaluate GitHub pull requests against milestone
-  acceptance criteria and produce an auditable trust score.
-- **Pay on Delivery** — release milestone payments through PayPal only after
-  the configured delivery and approval workflow permits it.
-- **Auditability and policy controls** — keep decisions, state transitions,
-  webhook deliveries, and payment events behind server-side validation.
+## ✨ Key Features
 
-## Technology stack
+- **🤖 AI-supervised project delivery** — a Central Supervisor Agent routes work across specialist agents for planning, talent, delivery, finance, and rescheduling.
+- **📅 Visual planning workspace** — an AG Grid backlog feeding a Bryntum Gantt scheduling engine with WBS, dependencies, and critical-path analysis.
+- **🧑‍💼 Consultant vetting with Trust Scores** — transparent, evidence-backed trust signals computed from real GitHub portfolio data.
+- **✅ Delivery verification** — GitHub Pull Requests are evaluated against milestone acceptance criteria to produce an auditable verification result.
+- **💰 Pay on Delivery** — escrow funds are captured via PayPal Sandbox and milestone payouts are released only after deterministic AI verification plus human approval.
+- **📊 Operational Command Center** — high-performance grids over consultant pipelines, escrow ledgers, and multi-agent execution logs.
+- **🔒 Auditability by design** — append-only audit records for milestone transitions, webhook deliveries, and payment events.
 
-| Area | Technology |
-|---|---|
-| Application framework | Next.js 16 with React 19 and TypeScript |
-| Planning backlog | AG Grid Community 32 |
-| Scheduling engine | Bryntum Gantt 7.3 with the React wrapper |
-| AI orchestration | Vercel AI SDK |
-| AI provider | Groq |
-| Database | Neon Postgres through Drizzle ORM |
-| Payments | PayPal REST APIs, Orders, Payouts, and webhooks |
-| Source-control integration | GitHub REST API and signed GitHub webhooks |
-| CI/CD integration | GitHub Actions-compatible repository automation and GitHub webhook workflows |
-| UI | Tailwind CSS, Base UI, Lucide icons, React Markdown |
-| Testing | Vitest and Playwright |
-| Deployment target | Vercel-compatible Next.js deployment |
+---
 
-The repository currently contains GitHub integration and webhook handlers. CI
-workflow files can be added under `.github/workflows/` according to the
-deployment environment; the application does not treat browser-side GitHub
-events as trusted.
+## 🚀 Setup Instructions
 
-## Architecture
+Follow these steps to run the project locally.
 
-### Request and rendering boundaries
+### Prerequisites
 
-The `/planning` route is rendered by
-[`app/(company)/planning/page.tsx`](./app/(company)/planning/page.tsx). The
-server page shapes serializable task and dependency props, then renders
-[`PlanningLayout.tsx`](./components/bryntum-gantt/PlanningLayout.tsx), a client
-component.
+- **Node.js 20+** and **npm**
+- **Python 3.11+** (for the FastAPI multi-agent backend)
+- A **Neon Postgres** database (connection string)
+- A **Groq API key** (for live AI responses)
+- **PayPal Sandbox** credentials — Client ID, Client Secret, and Webhook ID (for payment testing)
+- **GitHub** personal access token + webhook secret (for delivery verification)
 
-Bryntum imports are isolated to the Gantt component tree. The page uses a
-dynamic `ssr: false` import for
-[`BryntumGantt.tsx`](./components/bryntum-gantt/BryntumGantt.tsx), preventing
-browser-only scheduling code from executing during server rendering.
-
-At a high level:
-
-```text
-Planning page (server)
-  └── PlanningLayout (client orchestrator)
-      ├── UnscheduledTasksGrid (AG Grid backlog)
-      └── BryntumGantt (dynamic browser-only chart)
-          └── GanttChatPanel (AI scheduling UI)
-```
-
-### Split-screen planning architecture
-
-The planning workspace is intentionally divided into two cooperating surfaces:
-
-#### AG Grid: high-performance backlog
-
-[`UnscheduledTasksGrid.tsx`](./components/bryntum-gantt/UnscheduledTasksGrid.tsx)
-renders the local `unscheduledTasks` collection. Each row has a stable ID,
-task name, priority, and estimated duration. AG Grid's `getRowId` maps the
-rendered row to the underlying task, allowing the cross-component drag helper
-to resolve the original task safely instead of passing a DOM row or grid node
-into Bryntum.
-
-AG Grid is the source of truth for tasks that have not yet been placed on the
-timeline. Removing an item from the React array causes AG Grid to re-render and
-remove that row without a page reload.
-
-#### Bryntum Gantt: scheduling engine and WBS manager
-
-[`BryntumGantt.tsx`](./components/bryntum-gantt/BryntumGantt.tsx) owns the
-browser-only Gantt widget and its project configuration. Bryntum manages the
-visual timeline, task hierarchy/WBS, dependencies, date calculations, editing,
-critical-path features, and transactional undo/redo behavior.
-
-The component receives serializable task and dependency data. Mutations are
-sent directly to the active project's `taskStore`; Bryntum creates its own
-`TaskModel` instances from normalized plain objects.
-
-## Planning state mutation and render cycle
-
-Both drag-and-drop and AI scheduling use the same normalized mutation path in
-`PlanningLayout`:
-
-1. **Identify the task.** The drag handler resolves the AG Grid row ID; the AI
-   handler resolves the `taskId` returned by the `scheduleTask` tool.
-2. **Validate local availability.** The ID must still exist in the current
-   `unscheduledTasks` collection held in `unscheduledRef`.
-3. **Normalize task data.** Only serializable task fields are copied:
-   `id`, `name`, `startDate`, `duration`, `percentDone`, and `parentId`.
-   Raw DOM elements, AG Grid row nodes, and internal model objects are never
-   passed to Bryntum.
-4. **Insert into Bryntum.** The normalized object is passed to
-   `ganttRef.current.instance.project.taskStore.add()`. Bryntum constructs
-   the corresponding task model and updates the timeline in place.
-5. **Remove from the backlog.** After a successful store insertion,
-   `setUnscheduledTasks()` filters the task out of React state. AG Grid observes
-   the new array and removes the row.
-6. **Render without navigation.** React re-renders the backlog while Bryntum
-   refreshes its project/timeline state. No page reload or route transition is
-   required.
-
-This sequence keeps the two UI surfaces consistent while respecting each
-library's data model. The same `scheduleTask()` callback is used by the
-DragHelper drop handler and by AI tool execution.
-
-### Drag-and-drop flow
-
-`PlanningLayout` creates a Bryntum `DragHelper` after the split-screen DOM is
-ready:
-
-- `.ag-row` is the drag source.
-- The right-hand `.gantt-drop-zone` is the primary drop zone, with Bryntum
-  wrapper fallbacks `.b-gantt` and `.b-gridbase`.
-- The drag listener explicitly marks the context valid while the pointer is
-  inside the right panel.
-- The drop handler computes a start date from the pointer's Gantt coordinate,
-  calls `scheduleTask()`, and removes the row only after insertion succeeds.
-
-The Gantt root is also constrained with `min-width: 0` and `overflow: hidden`
-through the flex hierarchy, allowing Bryntum's internal horizontal scrollbars
-to handle timeline width rather than creating page-level overflow.
-
-## AI Copilot and function calling
-
-The planning chat is rendered by
-[`GanttChatPanel.tsx`](./components/bryntum-gantt/GanttChatPanel.tsx). It
-provides a dark, rounded interface with Markdown rendering for assistant
-responses and sends the user's natural-language request to the
-`onAiMessage` callback.
-
-The callback in `PlanningLayout` calls:
-
-```text
-POST /api/ai/planning
-```
-
-implemented by
-[`app/api/ai/planning/route.ts`](./app/api/ai/planning/route.ts).
-
-The route:
-
-1. Validates the message and available task list with Zod.
-2. Includes the current unscheduled task IDs and names in the model context.
-3. Creates a Groq model through `@ai-sdk/groq`.
-4. Exposes the `scheduleTask` tool with:
-   - `taskId`
-   - `targetStartDate` (`YYYY-MM-DD`)
-5. Returns assistant Markdown plus structured tool calls.
-
-The client processes returned `scheduleTask` calls and invokes the same
-`scheduleTask()` state mutation used by drag-and-drop. The response is then
-shown in `GanttChatPanel`, including a short scheduling confirmation.
-
-The model is instructed to schedule only tasks present in the supplied
-available-task list. The client performs a second lookup before mutation, so a
-stale or fabricated task ID cannot be inserted into the Gantt store.
-
-## Delivery verification and Pay on Delivery
-
-ConsultAI connects engineering delivery evidence to milestone payment
-decisions:
-
-1. A GitHub pull-request or push webhook is received at
-   [`app/api/github/webhook/route.ts`](./app/api/github/webhook/route.ts).
-2. The webhook signature is verified when `GITHUB_WEBHOOK_SECRET` is
-   configured.
-3. The active milestone and its acceptance criteria are loaded from Neon
-   Postgres.
-4. GitHub pull-request files and check data are evaluated using deterministic
-   checks plus a Groq-backed acceptance evaluator.
-5. A trust score is calculated from passed criteria. A score at or above
-   `MILESTONE_EVAL_THRESHOLD` can advance the milestone to `submitted`.
-6. The webhook writes an audit entry. It does not move money directly.
-7. The company approval and delivery workflow can then authorize the PayPal
-   payout through the dedicated payment routes.
-
-The PayPal webhook handler
-[`app/api/paypal/webhook/route.ts`](./app/api/paypal/webhook/route.ts)
-verifies PayPal signatures, records deliveries idempotently, applies
-milestone/payment state-machine transitions, and records relevant audit data.
-This keeps external payment events authoritative and protects against
-duplicate or out-of-order webhook delivery.
-
-## Repository structure
-
-```text
-app/
-  (company)/planning/       Planning route and server-side prop shaping
-  api/ai/planning/          Groq scheduling agent
-  api/agent/                Brief, vetting, harness, and payment agents
-  api/delivery/             Delivery verification and payout proposals
-  api/github/webhook/       Signed GitHub delivery evaluation
-  api/paypal/               PayPal orders, payouts, disputes, and webhooks
-components/
-  bryntum-gantt/            Split planning UI, Gantt, backlog, and chat
-  agent/                    General AI chat and agent surfaces
-  payments/                 Payment-related UI
-lib/
-  db/                       Drizzle schema, migrations, and audit helpers
-  paypal/                   PayPal client and webhook verification
-  delivery/                 Delivery policy and LLM evaluation
-  brief/                    Brief schemas and agent tools
-  vetting/                  Candidate and GitHub evidence utilities
-docs/                       Product, UI, and implementation documentation
-.github/skills/             Repository-specific engineering guidance
-```
-
-## Local development
-
-### Requirements
-
-- Node.js 20 or newer
-- npm
-- A Neon Postgres database for persistence-backed features
-- Groq credentials for live AI responses
-- PayPal sandbox credentials for payment testing
-- GitHub credentials and webhook configuration for delivery verification
-
-### Setup
+### 1. Install frontend dependencies
 
 ```bash
 npm install
-cp .env.example .env.local  # if the example file is present in your checkout
-npm run dev
 ```
 
-The development server uses the Webpack Next.js pipeline:
+### 2. Configure environment variables
+
+Copy the template and fill in your own values:
+
+```bash
+cp .env.example .env.local
+```
+
+Key variables in `.env.local`:
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | Neon Postgres connection string |
+| `GROQ_API_KEY` | Groq API authentication for AI agents |
+| `BACKEND_API_URL` | URL of the FastAPI backend (default `http://localhost:10000`) |
+| `INTERNAL_API_SECRET` | Shared secret between Next.js and the FastAPI backend |
+| `PAYPAL_ENV` | `sandbox` for testing |
+| `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` | PayPal Sandbox API credentials |
+| `PAYPAL_WEBHOOK_ID` | PayPal webhook registration ID |
+| `NEXT_PUBLIC_PAYPAL_CLIENT_ID` | Browser-visible PayPal SDK client ID |
+| `GITHUB_TOKEN` | GitHub API access for delivery evidence |
+| `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub webhook verification |
+| `MILESTONE_EVAL_THRESHOLD` | Trust-score threshold for milestone submission |
+| `ROLE_COOKIE_SECRET` | Secret used to sign the demo role cookie |
+| `APP_BASE_URL` | Canonical app URL (default `http://localhost:3000`) |
+
+> 🔐 **Never commit secrets.** Use `.env.local` for development and your hosting provider's secret manager in production.
+
+### 3. Set up the database
+
+```bash
+npm run db:push
+```
+
+### 4. Start the FastAPI backend (multi-agent orchestration)
+
+```bash
+pip install -r requirements.txt
+uvicorn backend.main:app --host 0.0.0.0 --port 10000
+```
+
+The backend exposes the agent orchestrator, GitHub webhook verification, payout policy checks, and health probes (`GET /health`, `GET /ready`).
+
+### 5. Start the development server
 
 ```bash
 npm run dev
 ```
 
-This is required by the Bryntum and Tailwind integration in the current
-project configuration.
+Then open **http://localhost:3000** in your browser.
+
+> ℹ️ The dev server runs on the **Webpack** Next.js pipeline (`next dev --webpack`), as required by the Bryntum Gantt integration.
 
 ### Common commands
 
@@ -294,72 +110,108 @@ project configuration.
 | `npm run typecheck` | Run TypeScript without emitting files |
 | `npm run lint` | Run ESLint |
 | `npm test` | Run the Vitest suite |
-| `npm run test:watch` | Run Vitest in watch mode |
-| `npm run db:generate` | Generate Drizzle migrations |
-| `npm run db:push` | Push the current Drizzle schema |
-| `npm run db:studio` | Open Drizzle Studio |
 
-## Configuration
+---
 
-The exact required set depends on the feature being exercised. Common
-server-side variables include:
+## 🤖 AI Integration
 
-| Variable | Purpose |
-|---|---|
-| `DATABASE_URL` | Neon Postgres connection string |
-| `GROQ_API_KEY` | Groq API authentication for AI agents |
-| `LLM_GROQ_MODEL` | Optional Groq model override |
-| `APP_BASE_URL` | Canonical public application URL |
-| `GITHUB_TOKEN` / `GITHUB_PAT` | GitHub API access for delivery evidence |
-| `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub webhook verification |
-| `MILESTONE_EVAL_THRESHOLD` | Trust-score threshold for milestone submission |
-| `PAYPAL_ENV` | `sandbox` or explicitly enabled `live` mode |
-| `PAYPAL_CLIENT_ID` | Server-side PayPal client ID |
-| `PAYPAL_CLIENT_SECRET` | Server-side PayPal client secret |
-| `PAYPAL_WEBHOOK_ID` | PayPal webhook registration ID |
-| `NEXT_PUBLIC_PAYPAL_CLIENT_ID` | Browser-visible PayPal SDK client ID |
-| `ROLE_COOKIE_SECRET` | Secret used to sign the demo role cookie |
-| `ALLOW_LIVE` | Explicit opt-in required for live PayPal calls |
+AI is the operating core of ConsultAI — not a chatbot bolted on the side. A coordinated **multi-agent architecture** (Python FastAPI backend + Next.js) powered by **Groq models via the Vercel AI SDK** drives planning, vetting, verification, and scheduling, while **deterministic server-side policies** keep every decision auditable and every payment human-gated.
 
-Never commit secrets. Use local environment files for development and the
-deployment platform's secret manager for hosted environments.
+### 🧠 Central Supervisor Agent
 
-## Security and reliability principles
+- Implemented in `backend/orchestrator/supervisor.py` (+ `backend/orchestrator/workflow.py`).
+- **Classifies** each incoming request and **routes** it to the right specialist agent with structured context.
+- **Validates** agent outputs against deterministic business policies before anything is applied.
+- **Tracks** token consumption and execution duration for every run (visible in the AI Operations Center at `/ai-ops` with live SSE updates).
+- **Halts at Human Approval Gates** for sensitive financial or schedule operations — the AI can propose, but never unilaterally authorize transfers or bypass approval.
 
-- Validate external request bodies before use.
-- Verify GitHub and PayPal webhook authenticity.
-- Treat GitHub and pull-request content as untrusted data.
-- Keep policy decisions in deterministic server-side code rather than trusting
-  model output.
-- Use explicit payment state machines and idempotent webhook handling.
-- Do not pass DOM nodes, AG Grid row nodes, or internal Bryntum models across
-  the planning mutation boundary.
-- Fail closed when required credentials or verification data are unavailable.
-- Keep audit logging alongside milestone and payment transitions.
+### 📋 Planning Copilot
 
-## Testing and release checks
+- Implemented in `backend/agents/planning.py`, served to the UI through `POST /api/ai/planning` (`app/api/ai/planning/route.ts`).
+- Turns **natural-language requests into structured scheduling actions** via function calling (e.g. the `scheduleTask` tool with `taskId` + `targetStartDate`).
+- Generates **WBS task breakdowns, dependencies, timeline estimates, critical paths, project risks**, and Bryntum-ready Gantt task structures.
+- The client re-validates every proposed task ID against the live backlog before mutating the timeline, so stale or fabricated IDs can never corrupt the schedule.
 
-Before opening a pull request or deploying:
+### 🔍 Talent Vetting with Trust Scores
 
-```bash
-npm run typecheck
-npm run lint
-npm test
-npm run build
+- Implemented in `backend/agents/talent.py` with GitHub evidence utilities under `lib/vetting/`.
+- Evaluates consultant profiles against **real GitHub repository signals** — never fabricating verification evidence.
+- Computes a transparent **Trust Score** from passed evidence checks, with cited sources and an always-visible human-review notice.
+- Vetting runs only after recorded candidate consent, and every cited URL is verified against actually fetched data.
+
+### 🔄 Reschedule Copilot
+
+- Implemented in `backend/agents/reschedule.py`, acting on the Bryntum scheduling engine.
+- Analyzes **project delays**, propagates Finish-to-Start shifts across unlocked milestones, and detects **resource and dependency conflicts**.
+- Produces **validated Bryntum scheduling proposals** (start/due-date shifts with optimistic-concurrency protection) that a human reviews before anything moves.
+- Funded, in-payout, or paid milestones are **rejected from rescheduling** — the copilot fails closed to protect money in flight.
+
+> 🛡️ **Safety rule across all agents:** model output is always *advisory*. Policy decisions live in deterministic server-side code (`backend/policies/`, `lib/delivery/`, `lib/payments/`), and external content (GitHub PRs, webhooks) is always treated as untrusted input.
+
+---
+
+## 💳 PayPal Integration
+
+ConsultAI uses **PayPal Sandbox** end-to-end for its **Pay on Delivery** escrow model:
+
+1. **Escrow capture** — when a milestone is funded, the platform captures the escrow amount through the **PayPal Orders API** in Sandbox mode. Funds are held against the milestone — not paid out.
+2. **Deterministic AI verification** — when the freelancer submits delivery, a GitHub PR webhook triggers the Delivery Agent (`backend/agents/delivery.py`), which evaluates the PR against the milestone's acceptance criteria using deterministic checks plus a Groq-backed evaluator, producing an auditable **trust score**.
+3. **Automatic payout release** — when the trust score meets the configured threshold (`MILESTONE_EVAL_THRESHOLD`) and the company approves, the platform **automatically releases the milestone payout** through the **PayPal Payouts API**.
+4. **Webhook truth** — the PayPal webhook handler (`app/api/paypal/webhook/route.ts`) verifies signatures, records deliveries idempotently, and applies milestone/payment state-machine transitions, so duplicate or out-of-order events can never double-pay.
+5. **Six-stage financial security policy** — AI assessment (advisory only) → deterministic rule validation → explicit human authorization → actual PayPal transaction → confirmation (`payout_batch_id`) → persistent append-only audit record (`backend/policies/payments.py`, `lib/payments/payment-chat-tools.ts`, `app/api/paypal/payout/route.ts`).
+
+Live mode is **opt-in only**: `PAYPAL_ENV=sandbox` by default, and production calls additionally require `ALLOW_LIVE=true`.
+
+---
+
+## 🧩 Sponsors & Tools Integrations
+
+### ▲ Render
+
+**Render** is our robust **PaaS infrastructure**: it hosts the application, securely manages API webhooks (GitHub delivery events and PayPal payment notifications), and ensures the stable orchestration of our multi-agent AI workflows. The FastAPI backend deploys as a Render web service (`render.yaml`) with managed environment secrets (`GROQ_API_KEY`, `PAYPAL_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET`, `INTERNAL_API_SECRET`), health-check probes (`/health`, `/ready`), and CORS-locked origins — so agent execution, webhook ingestion, and payout policy checks stay reliable around the clock.
+
+### 📊 Bryntum Gantt
+
+**Bryntum Gantt** powers our **interactive scheduling engine**. It visualizes the project's **Work Breakdown Structure (WBS)** — hierarchy, dates, durations, dependencies, progress, and critical paths — on a transactional timeline with undo/redo. From the planning workspace (`/planning`), users drag backlog tasks onto the chart or **trigger the AI Copilot to calculate critical paths and generate rescheduling proposals**, which land on the timeline only after validation. Bryntum is isolated to a browser-only component tree (`components/bryntum-gantt/`, dynamically imported with `ssr: false`) to keep server rendering clean.
+
+### ⚡ AG Grid
+
+**AG Grid** acts as our high-performance **Operational Command Center**. It empowers managers to **sort, filter, and edit massive relational datasets with zero latency**: the unscheduled-task backlog feeding the Gantt chart, the 7-domain enterprise operations grids at `/operations` (**consultant pipelines, escrow ledgers**, tasks, companies, contracts, payments, and **multi-agent execution logs**), and the financial ledger with themed Community-tier features. Stable row IDs bind every rendered row to its underlying record, keeping grid state and timeline state perfectly in sync.
+
+---
+
+## 🗺️ Repository Structure
+
+```text
+app/
+  (company)/planning/       Planning route and server-side prop shaping
+  api/ai/planning/          Groq scheduling agent endpoint
+  api/agent/                Brief, vetting, harness, and payment agents
+  api/delivery/             Delivery verification and payout proposals
+  api/github/webhook/       Signed GitHub delivery evaluation
+  api/paypal/               PayPal orders, payouts, disputes, and webhooks
+backend/
+  orchestrator/             Central Supervisor Agent + workflow engine
+  agents/                   Planning, Talent, Delivery, Finance, Reschedule
+  policies/                 Deterministic payment and permission policies
+components/
+  bryntum-gantt/            Split planning UI: backlog + Gantt + AI chat
+  operations/               AG Grid enterprise operations grids
+  agent/                    General AI chat and agent surfaces
+  payments/                 Payment-related UI (approvals, ledger)
+lib/
+  db/                       Drizzle schema, migrations, and audit helpers
+  paypal/                   PayPal client and webhook verification
+  delivery/                 Delivery policy and LLM evaluation
+  vetting/                  Candidate and GitHub evidence utilities
+render.yaml                 Render PaaS deployment definition
+requirements.txt            Python backend dependencies
 ```
 
-For payment and webhook changes, also exercise signature validation,
-duplicate-delivery handling, state transitions, and sandbox payment flows.
-For planning changes, verify both drag-and-drop and AI scheduling paths:
+---
 
-1. Drag an AG Grid row into the Gantt panel.
-2. Confirm the row disappears from the backlog.
-3. Confirm the task appears on the Bryntum timeline.
-4. Ask the AI Copilot to schedule another available task.
-5. Confirm the AI response and the same two-pane state transition.
+## 📄 License
 
-## License and third-party components
+This project is licensed under the **MIT License** — an [OSI-approved](https://opensource.org/licenses/MIT) open-source license. See the [LICENSE](./LICENSE) file for the full text.
 
-ConsultAI uses third-party components whose licenses and trial terms apply,
-including Bryntum Gantt and PayPal services. Review the corresponding vendor
-agreements before production distribution or commercial deployment.
+> **Third-party components:** this project integrates third-party services and libraries (including Bryntum Gantt trial packages and PayPal services) whose own licenses and terms apply. Review the corresponding vendor agreements before production distribution or commercial deployment.

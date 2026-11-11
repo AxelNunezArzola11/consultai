@@ -19,7 +19,7 @@
  *   paypalOrderId: string | null
  *   paypalCaptureId: string | null
  *   paypalPayoutBatchId: string | null
- *   payment: { id, status, grossUsd, feeUsd, netUsd, payoutFeeUsd } | null
+ *   payment: { id, status, grossUsd, feeUsd, netUsd, payoutFeeUsd, payoutFailureReason } | null
  *   audit: { id, event, actor, createdAt, payload }[]
  * }
  */
@@ -108,6 +108,7 @@ export async function GET(
             feeUsd: payment.feeUsd,
             netUsd: payment.netUsd,
             payoutFeeUsd: payment.payoutFeeUsd,
+            payoutFailureReason: payment.payoutFailureReason,
           }
         : null,
       audit,
@@ -136,7 +137,8 @@ export async function GET(
     }
   }
 
-  // Latest payment for this milestone
+  // Latest payment for this milestone (a retry leaves the failed row
+  // behind, so newest-first keeps the panel on the current attempt).
   const paymentRows = await db
     .select({
       id:          payments.id,
@@ -145,9 +147,11 @@ export async function GET(
       feeUsd:      payments.feeUsd,
       netUsd:      payments.netUsd,
       payoutFeeUsd: payments.payoutFeeUsd,
+      payoutFailureReason: payments.payoutFailureReason,
     })
     .from(payments)
     .where(eq(payments.milestoneId, milestoneId))
+    .orderBy(desc(payments.createdAt))
     .limit(1);
 
   // Last 20 audit entries for this milestone

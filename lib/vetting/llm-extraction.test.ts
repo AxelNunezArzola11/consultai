@@ -19,6 +19,7 @@ import {
   extractSignals,
   verifyQuotedExcerpts,
   deterministicFallback,
+  normalizeRequirementId,
   shouldSkipExtraction,
   PROMPT_VERSION,
 } from "./llm-extraction";
@@ -111,6 +112,44 @@ describe("verifyQuotedExcerpts", () => {
     ];
     const result = verifyQuotedExcerpts(matches, content);
     expect(result).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeRequirementId — LLM id variants map to canonical known ids
+// ---------------------------------------------------------------------------
+
+describe("normalizeRequirementId", () => {
+  const known = ["skill-1", "skill-2", "skill-3", "skill-4"];
+
+  it("returns exact matches unchanged", () => {
+    expect(normalizeRequirementId("skill-1", known)).toBe("skill-1");
+  });
+
+  it("accepts a Set of known ids", () => {
+    expect(normalizeRequirementId("skill-2", new Set(known))).toBe("skill-2");
+  });
+
+  it("normalizes case, underscores, and surrounding whitespace", () => {
+    expect(normalizeRequirementId("  skill_1 ", known)).toBe("skill-1");
+    expect(normalizeRequirementId("SKILL-2", known)).toBe("skill-2");
+  });
+
+  it("maps bare integers to skill-N (the pipeline's own id scheme)", () => {
+    expect(normalizeRequirementId("1", known)).toBe("skill-1");
+    expect(normalizeRequirementId("4", known)).toBe("skill-4");
+  });
+
+  it("maps req-N / requirement-N prefixes to skill-N", () => {
+    expect(normalizeRequirementId("req-3", known)).toBe("skill-3");
+    expect(normalizeRequirementId("requirement-2", known)).toBe("skill-2");
+  });
+
+  it("returns null for ids outside the known set (still never invented)", () => {
+    expect(normalizeRequirementId("skill-9", known)).toBeNull();
+    expect(normalizeRequirementId("9", known)).toBeNull();
+    expect(normalizeRequirementId("react-expertise", known)).toBeNull();
+    expect(normalizeRequirementId("", known)).toBeNull();
   });
 });
 

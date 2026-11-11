@@ -132,6 +132,15 @@ export async function POST(request: NextRequest) {
     candidate.trustScore = trustScore.toFixed(2);
     candidate.vettingRanAt = new Date();
     candidate.updatedAt = new Date();
+    const diagnostics = {
+      ranAt: new Date().toISOString(),
+      signalCount: demoSignals.length,
+      usedFallback: false,
+      fabricatedDropped: 0,
+      reposAnalyzed: ["demo-fixtures"],
+      errors: [],
+    };
+    candidate.vettingDiagnostics = diagnostics;
     return NextResponse.json({
       humanReviewNotice:
         "SIMULATED vetting run over fictional demo signals. It is intended to assist your " +
@@ -147,6 +156,7 @@ export async function POST(request: NextRequest) {
       fabricatedDropped: 0,
       usedFallback: false,
       errors: [],
+      diagnostics,
       simulated: true,
       debugPayload: {
         requirementsSent: requirements,
@@ -219,6 +229,7 @@ export async function POST(request: NextRequest) {
       fabricatedDropped: result.fabricatedDropped,
       usedFallback: result.usedFallback,
       errors: result.errors,
+      diagnostics: result.diagnostics,
 
       // Debug payload — requirements sent to LLM + raw LLM output per source
       debugPayload: {

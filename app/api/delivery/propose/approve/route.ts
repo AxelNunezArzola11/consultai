@@ -20,7 +20,10 @@
  * Rate limit: 10 approvals per IP per 60 s.
  *
  * The proposal MUST be in status "requires_approval" or "auto_release_eligible".
- * Double-approve is idempotent (returns existing state).
+ * Double-approve is idempotent (returns existing state) AND retries the
+ * payout trigger when the eligible payment has no batch yet — recovery for
+ * approvals whose trigger failed (PAYOUT_TRIGGER_FAILED_AFTER_APPROVAL).
+ * An already-issued payout (batch id present) is never re-issued.
  *
  * SHA re-check rule (from design spec):
  *   Re-fetch head SHA at approval time AND right before payout.
@@ -28,8 +31,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
-import { nanoid } from "nanoid";
+import { desc, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
 import {
@@ -45,8 +47,109 @@ import { companySessionAllowsLiveAccess, getSessionFromCookie } from "@/lib/auth
 import { checkRateLimit, getIp } from "@/lib/auth/rate-limit";
 import { fetchPRDetails, GitHubApiError } from "@/lib/delivery/github-client";
 import { isDemoMode } from "@/lib/demo/config";
+import {
+  isPayoutIssued,
+  selectPayoutEligiblePayment,
+} from "@/lib/payments/payout-trigger";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Triggers the PayPal payout for an approved proposal's milestone.
+ *
+ * Payment selection (the stuck-payout fix): a milestone can hold several
+ * payment rows (e.g. a stale `pending` row from an earlier funding attempt
+ * next to the real `processing` row from the completed capture). An
+ * unfiltered LIMIT 1 lookup returned an arbitrary row — once a stale
+ * `pending` row, which the payout executor rejected, so no payout was
+ * ever issued and the milestone waited forever for a webhook that could
+ * never arrive. We now fetch all rows and pay the eligible one
+ * (newest `processing`, else newest `on_hold`).
+ *
+ * Returns `{ payoutResult, paymentId }`. `payoutResult` is null when the
+ * milestone has no payment rows at all (preserved legacy behavior).
+ */
+async function triggerPayoutForMilestone(opts: {
+  milestoneId: string;
+  proposalId: string;
+  recipientEmail: string;
+  actor: string;
+}): Promise<{ payoutResult: Record<string, unknown> | null; paymentId: string | null }> {
+  const { milestoneId, proposalId, recipientEmail, actor } = opts;
+  const paymentRows = await db
+    .select()
+    .from(payments)
+    .where(eq(payments.milestoneId, milestoneId))
+    .orderBy(desc(payments.updatedAt));
+
+  if (paymentRows.length === 0) {
+    return { payoutResult: null, paymentId: null };
+  }
+
+  const paymentRow = selectPayoutEligiblePayment(paymentRows);
+  if (!paymentRow) {
+    // Rows exist but none can be paid (e.g. all pending/failed) — say so
+    // explicitly instead of attempting a doomed payout against a bad row.
+    const skipped = {
+      status: "skipped",
+      error:
+        "No payout-eligible payment (processing/on_hold) for this milestone — fund the milestone and complete the capture first",
+    };
+    console.error("[delivery/approve] No payout-eligible payment:", {
+      proposalId,
+      milestoneId,
+      rowStatuses: paymentRows.map((r) => `${r.id}:${r.status}`),
+    });
+    await writeAuditLog({
+      entityType: "payment",
+      entityId: paymentRows[0].id,
+      event: "PAYOUT_TRIGGER_SKIPPED_NO_ELIGIBLE_PAYMENT",
+      actor,
+      payload: { proposalId, milestoneId, payoutResult: skipped },
+    });
+    return { payoutResult: skipped, paymentId: null };
+  }
+
+  if (isPayoutIssued(paymentRow)) {
+    // Payout already issued (batch recorded) — webhook pending or lost.
+    // Read-only no-op: never re-issue when a batch exists.
+    return {
+      payoutResult: {
+        status: "already_issued",
+        paymentId: paymentRow.id,
+        batchId: paymentRow.paypalPayoutBatchId,
+      },
+      paymentId: paymentRow.id,
+    };
+  }
+
+  // Execute the payout in-process instead of an HTTP round-trip to
+  // /api/paypal/payout. The old path minted a fresh company role cookie
+  // for the internal call, discarding the caller's session (and its
+  // company scoping); the direct call keeps this request's auth context.
+  const { executeDirectPayout } = await import("@/lib/payments/direct-payout");
+  const direct = await executeDirectPayout({
+    paymentId: paymentRow.id,
+    recipientEmail,
+    note: `Delivery approved — proposal ${proposalId}`,
+    bypass_approval: false,
+  });
+  const payoutResult = direct as unknown as Record<string, unknown>;
+
+  if (direct.error) {
+    // Payout failed after approval — log but don't revert approval
+    console.error("[delivery/approve] Payout call failed after approval:", payoutResult);
+    await writeAuditLog({
+      entityType: "payment",
+      entityId: paymentRow.id,
+      event: "PAYOUT_TRIGGER_FAILED_AFTER_APPROVAL",
+      actor,
+      payload: { proposalId, payoutResult },
+    });
+  }
+
+  return { payoutResult, paymentId: paymentRow.id };
+}
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Auth: company or admin ────────────────────────────────────────────────
@@ -211,6 +314,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // Idempotent: already decided
     if (proposal.status === "approved") {
+      // Recovery: a past approval may have recorded the decision while the
+      // payout trigger failed (see PAYOUT_TRIGGER_FAILED_AFTER_APPROVAL).
+      // Re-clicking Approve retries ONLY the payout trigger against the
+      // eligible payment — proposal state is untouched, and an already
+      // issued payout is never re-issued (batch id present → no-op).
+      if (decision === "approved") {
+        const { payoutResult } = await triggerPayoutForMilestone({
+          milestoneId: proposal.milestoneId,
+          proposalId,
+          recipientEmail: recipientEmail as string,
+          actor: session ? `${session.role}:${session.userId}` : "system",
+        });
+        return NextResponse.json({
+          status: "ok",
+          message: "Proposal already approved (idempotent)",
+          proposalId,
+          decision: "approved",
+          payout: payoutResult,
+          payoutRetried: true,
+        });
+      }
       return NextResponse.json({
         status: "ok",
         message: "Proposal already approved (idempotent)",
@@ -338,39 +462,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // ── On approval: trigger payout via existing route ────────────────────
     let payoutResult: Record<string, unknown> | null = null;
     if (decision === "approved") {
-      // Find the payment row for this milestone
-      const [paymentRow] = await db
-        .select()
-        .from(payments)
-        .where(eq(payments.milestoneId, proposal.milestoneId))
-        .limit(1);
-
-      if (paymentRow) {
-        // Execute the payout in-process instead of an HTTP round-trip to
-        // /api/paypal/payout. The old path minted a fresh company role cookie
-        // for the internal call, discarding the caller's session (and its
-        // company scoping); the direct call keeps this request's auth context.
-        const { executeDirectPayout } = await import("@/lib/payments/direct-payout");
-        const direct = await executeDirectPayout({
-          paymentId: paymentRow.id,
-          recipientEmail: recipientEmail as string,
-          note: `Delivery approved — proposal ${proposalId}`,
-          bypass_approval: false,
-        });
-        payoutResult = direct as unknown as Record<string, unknown>;
-
-        if (direct.error) {
-          // Payout failed after approval — log but don't revert approval
-          console.error("[delivery/approve] Payout call failed after approval:", payoutResult);
-          await writeAuditLog({
-            entityType: "payment",
-            entityId: paymentRow.id,
-            event: "PAYOUT_TRIGGER_FAILED_AFTER_APPROVAL",
-            actor: session ? `${session.role}:${session.userId}` : "system",
-            payload: { proposalId, payoutResult },
-          });
-        }
-      }
+      ({ payoutResult } = await triggerPayoutForMilestone({
+        milestoneId: proposal.milestoneId,
+        proposalId,
+        recipientEmail: recipientEmail as string,
+        actor: session ? `${session.role}:${session.userId}` : "system",
+      }));
     }
 
     return NextResponse.json({

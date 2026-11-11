@@ -16,6 +16,11 @@
  * 11. Out-of-order: SUCCEEDED arrives when payment already "succeeded" (idempotent)
  * 12. State machine: verifying → failed and verifying → returned allowed
  * 13. Payout replay — no second payment (same-state idempotency)
+ * 14. PAYOUTSBATCH.DENIED handler: payment → failed, milestone → failed;
+ *     unknown batch id is a recorded no-op
+ * 15. PAYOUTSBATCH.FAILED handler (plus PAYMENT.PAYOUTS-BATCH.FAILED alias):
+ *     payment → failed, milestone → failed, failure reason persisted
+ * 16. PAYOUTS-ITEM.FAILED persists the PayPal errors.name/message reason
  *
  * NOTE: FAILED and RETURNED cases are UNTESTED against real PayPal — fixture only.
  *
@@ -43,6 +48,8 @@ import {
   isPaymentTransitionAllowed,
   MilestoneTransitionError,
   PaymentTransitionError,
+  type MilestoneStatus,
+  type PaymentStatus,
 } from "@/lib/state-machines/milestone-payment";
 
 // ---------------------------------------------------------------------------
@@ -58,6 +65,7 @@ vi.mock("@/lib/db", () => ({
     select: vi.fn(),
     insert: vi.fn(),
     update: vi.fn(),
+    execute: vi.fn(),
   },
 }));
 
@@ -112,6 +120,32 @@ function payoutsBatchSuccessEvent(batchId: string) {
     event_type: "PAYMENT.PAYOUTSBATCH.SUCCESS",
     resource: {
       batch_header: { payout_batch_id: batchId, batch_status: "SUCCESS" },
+    },
+  };
+}
+
+/** Fixture: PAYMENT.PAYOUTSBATCH.DENIED [UNTESTED against real PayPal — fixture only] */
+function payoutsBatchDeniedEvent(batchId: string) {
+  return {
+    id: `WH-BATCH-DEN-${batchId}`,
+    event_type: "PAYMENT.PAYOUTSBATCH.DENIED",
+    resource: {
+      batch_header: { payout_batch_id: batchId, batch_status: "DENIED" },
+    },
+  };
+}
+
+/** Fixture: PAYMENT.PAYOUTSBATCH.FAILED [UNTESTED against real PayPal — fixture only] */
+function payoutsBatchFailedEvent(batchId: string, eventType = "PAYMENT.PAYOUTSBATCH.FAILED") {
+  return {
+    id: `WH-BATCH-FAIL-${batchId}`,
+    event_type: eventType,
+    resource: {
+      batch_header: { payout_batch_id: batchId, batch_status: "FAILED" },
+      errors: {
+        name: "COMPLIANCE_REVIEW",
+        message: "The batch failed compliance review.",
+      },
     },
   };
 }
@@ -250,6 +284,9 @@ function setupHandlerMock(
   const mockOnConflict = vi.fn().mockReturnValue({ returning: mockReturning });
   const mockValues = vi.fn().mockReturnValue({ onConflictDoNothing: mockOnConflict });
   (db.insert as unknown as MockInstance).mockReturnValue({ values: mockValues });
+
+  // Column-bootstrap DDL (ensurePayoutFailureReasonColumn) succeeds
+  (db.execute as unknown as MockInstance).mockResolvedValue(undefined);
 
   return { capturedSetCalls };
 }
@@ -548,12 +585,19 @@ describe("9. PAYOUTS-ITEM.FAILED handler [UNTESTED against real PayPal — fixtu
     const res = await POST(req);
 
     expect(res.status).toBe(200);
-    expect(db.update).toHaveBeenCalledTimes(2);
+    // Payment status + failure reason + milestone status
+    expect(db.update).toHaveBeenCalledTimes(3);
 
     const paymentUpdate = capturedSetCalls[0] as Record<string, unknown>;
     expect(paymentUpdate).toHaveProperty("status", "failed");
 
-    const milestoneUpdate = capturedSetCalls[1] as Record<string, unknown>;
+    const reasonUpdate = capturedSetCalls[1] as Record<string, unknown>;
+    expect(reasonUpdate).toHaveProperty(
+      "payoutFailureReason",
+      "RECEIVER_UNREGISTERED: The receiver does not have a PayPal account."
+    );
+
+    const milestoneUpdate = capturedSetCalls[2] as Record<string, unknown>;
     expect(milestoneUpdate).toHaveProperty("status", "failed");
 
     expect(writeAuditLog).toHaveBeenCalledWith(
@@ -617,7 +661,7 @@ describe("11. Out-of-order event delivery", () => {
   it("out-of-order full sequence still ends in correct state", () => {
     // Simulate the full happy path even with out-of-order events:
     // All individual transitions should be allowed; same-state = allowed (idempotent)
-    const milestoneSeq: [string, string][] = [
+    const milestoneSeq: Array<[MilestoneStatus, MilestoneStatus]> = [
       ["planned",          "funded"],
       ["funded",           "pending_approval"],
       ["pending_approval", "verifying"],
@@ -625,17 +669,17 @@ describe("11. Out-of-order event delivery", () => {
     ];
     for (const [from, to] of milestoneSeq) {
       expect(() =>
-        assertMilestoneTransition(from as any, to as any)
+        assertMilestoneTransition(from, to)
       ).not.toThrow();
     }
 
-    const paymentSeq: [string, string][] = [
+    const paymentSeq: Array<[PaymentStatus, PaymentStatus]> = [
       ["pending",    "processing"],
       ["processing", "succeeded"],
     ];
     for (const [from, to] of paymentSeq) {
       expect(() =>
-        assertPaymentTransition(from as any, to as any)
+        assertPaymentTransition(from, to)
       ).not.toThrow();
     }
   });
@@ -675,5 +719,171 @@ describe("13. Payout replay — idempotency (same-state no-op)", () => {
   it("succeeded → succeeded is idempotent (duplicate SUCCEEDED webhook)", () => {
     expect(() => assertPaymentTransition("succeeded", "succeeded")).not.toThrow();
     expect(isPaymentTransitionAllowed("succeeded", "succeeded")).toBe(true);
+  });
+});
+
+// ===========================================================================
+// 14. PAYOUTSBATCH.DENIED [UNTESTED against real PayPal — fixture only]
+// ===========================================================================
+
+describe("14. PAYOUTSBATCH.DENIED handler [UNTESTED against real PayPal — fixture only]", () => {
+  it("updates payment → failed and milestone → failed (denied batches emit no item events)", async () => {
+    const payment: FakePayment = { id: "pay-006", milestoneId: "ms-006", status: "processing" };
+    const milestone: FakeMilestone = { id: "ms-006", status: "verifying" };
+    const { capturedSetCalls } = setupHandlerMock(payment, milestone);
+
+    const req = buildRequest(payoutsBatchDeniedEvent("BATCH-DEN-006"));
+    const res = await POST(req);
+
+    expect(res.status).toBe(200);
+    expect(db.update).toHaveBeenCalledTimes(2);
+
+    const paymentUpdate = capturedSetCalls[0] as Record<string, unknown>;
+    expect(paymentUpdate).toHaveProperty("status", "failed");
+
+    const milestoneUpdate = capturedSetCalls[1] as Record<string, unknown>;
+    expect(milestoneUpdate).toHaveProperty("status", "failed");
+
+    expect(writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "PAYOUT_BATCH_DENIED" })
+    );
+  });
+
+  it("is a no-op when the batch maps to no payment (unknown batch id)", async () => {
+    // Custom chain: duplicate check → [], payment lookup → [] (no match).
+    const mockLimit = vi.fn().mockImplementation(() => Promise.resolve([]));
+    const mockWhere = vi.fn().mockReturnValue({ limit: mockLimit });
+    const mockFrom = vi.fn().mockReturnValue({ where: mockWhere });
+    (db.select as unknown as MockInstance).mockReturnValue({ from: mockFrom });
+    const mockSet = vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) });
+    (db.update as unknown as MockInstance).mockReturnValue({ set: mockSet });
+    const mockReturning = vi.fn().mockResolvedValue([{ eventId: "WH-BATCH-DEN-UNKNOWN" }]);
+    const mockOnConflict = vi.fn().mockReturnValue({ returning: mockReturning });
+    const mockValues = vi.fn().mockReturnValue({ onConflictDoNothing: mockOnConflict });
+    (db.insert as unknown as MockInstance).mockReturnValue({ values: mockValues });
+
+    const req = buildRequest(payoutsBatchDeniedEvent("BATCH-UNKNOWN"));
+    const res = await POST(req);
+
+    expect(res.status).toBe(200);
+    expect(mockSet).not.toHaveBeenCalled();
+    expect(writeAuditLog).not.toHaveBeenCalled();
+    // Event still recorded (handler "succeeded" via early return).
+    expect(mockValues).toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// 15. PAYOUTSBATCH.FAILED [UNTESTED against real PayPal — fixture only]
+// ===========================================================================
+
+describe("15. PAYOUTSBATCH.FAILED handler [UNTESTED against real PayPal — fixture only]", () => {
+  it("updates payment → failed and milestone → failed, persisting the failure reason", async () => {
+    const payment: FakePayment = { id: "pay-007", milestoneId: "ms-007", status: "processing" };
+    const milestone: FakeMilestone = { id: "ms-007", status: "verifying" };
+    const { capturedSetCalls } = setupHandlerMock(payment, milestone);
+
+    const req = buildRequest(payoutsBatchFailedEvent("BATCH-FAIL-007"));
+    const res = await POST(req);
+
+    expect(res.status).toBe(200);
+    // Payment status + failure reason + milestone status
+    expect(db.update).toHaveBeenCalledTimes(3);
+
+    const paymentUpdate = capturedSetCalls[0] as Record<string, unknown>;
+    expect(paymentUpdate).toHaveProperty("status", "failed");
+
+    const reasonUpdate = capturedSetCalls[1] as Record<string, unknown>;
+    expect(reasonUpdate).toHaveProperty(
+      "payoutFailureReason",
+      "COMPLIANCE_REVIEW: The batch failed compliance review."
+    );
+
+    const milestoneUpdate = capturedSetCalls[2] as Record<string, unknown>;
+    expect(milestoneUpdate).toHaveProperty("status", "failed");
+
+    expect(writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "PAYOUT_BATCH_FAILED",
+        payload: expect.objectContaining({
+          failureReason: "COMPLIANCE_REVIEW: The batch failed compliance review.",
+        }),
+      })
+    );
+  });
+
+  it("handles the PAYMENT.PAYOUTS-BATCH.FAILED (dashed) alias identically", async () => {
+    const payment: FakePayment = { id: "pay-008", milestoneId: "ms-008", status: "processing" };
+    const milestone: FakeMilestone = { id: "ms-008", status: "verifying" };
+    const { capturedSetCalls } = setupHandlerMock(payment, milestone);
+
+    const req = buildRequest(
+      payoutsBatchFailedEvent("BATCH-FAIL-008", "PAYMENT.PAYOUTS-BATCH.FAILED")
+    );
+    const res = await POST(req);
+
+    expect(res.status).toBe(200);
+    expect(db.update).toHaveBeenCalledTimes(3);
+
+    const paymentUpdate = capturedSetCalls[0] as Record<string, unknown>;
+    expect(paymentUpdate).toHaveProperty("status", "failed");
+
+    const milestoneUpdate = capturedSetCalls[2] as Record<string, unknown>;
+    expect(milestoneUpdate).toHaveProperty("status", "failed");
+
+    expect(writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "PAYOUT_BATCH_FAILED" })
+    );
+  });
+});
+
+// ===========================================================================
+// 16. PAYOUTS-ITEM.FAILED persists the failure reason
+// ===========================================================================
+
+describe("16. PAYOUTS-ITEM.FAILED persists the failure reason [UNTESTED against real PayPal — fixture only]", () => {
+  it("stores errors.name/message on the payment row and in the audit payload", async () => {
+    const payment: FakePayment = { id: "pay-009", milestoneId: "ms-009", status: "processing" };
+    const milestone: FakeMilestone = { id: "ms-009", status: "verifying" };
+    const { capturedSetCalls } = setupHandlerMock(payment, milestone);
+
+    const req = buildRequest(payoutsItemFailedEvent("pay-009", "ITEM-FAIL-009"));
+    const res = await POST(req);
+
+    expect(res.status).toBe(200);
+    // Payment status + failure reason + milestone status
+    expect(db.update).toHaveBeenCalledTimes(3);
+
+    const reasonUpdate = capturedSetCalls[1] as Record<string, unknown>;
+    expect(reasonUpdate).toHaveProperty(
+      "payoutFailureReason",
+      "RECEIVER_UNREGISTERED: The receiver does not have a PayPal account."
+    );
+
+    expect(writeAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "PAYOUT_ITEM_FAILED",
+        payload: expect.objectContaining({
+          failureCode: "RECEIVER_UNREGISTERED",
+          failureReason: "RECEIVER_UNREGISTERED: The receiver does not have a PayPal account.",
+        }),
+      })
+    );
+  });
+
+  it("still fails the payment when the payload carries no reason (no reason update)", async () => {
+    const payment: FakePayment = { id: "pay-010", milestoneId: "ms-010", status: "processing" };
+    const milestone: FakeMilestone = { id: "ms-010", status: "verifying" };
+    const { capturedSetCalls } = setupHandlerMock(payment, milestone);
+
+    const req = buildRequest(payoutsItemReturnedEvent("pay-010", "ITEM-RET-010"));
+    const res = await POST(req);
+
+    expect(res.status).toBe(200);
+    // No reason in payload → only payment status + milestone status updates
+    expect(db.update).toHaveBeenCalledTimes(2);
+
+    const paymentUpdate = capturedSetCalls[0] as Record<string, unknown>;
+    expect(paymentUpdate).toHaveProperty("status", "failed");
   });
 });

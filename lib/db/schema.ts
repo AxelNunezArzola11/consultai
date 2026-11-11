@@ -329,6 +329,14 @@ export const candidates = pgTable("candidates", {
   /** [{skill, reason}] */
   cannotDo: jsonb("cannot_do"),
   vettingSummary: text("vetting_summary"),
+  /**
+   * Per-run vetting diagnostics (migration 0011): why the last run scored
+   * what it did — repos analyzed, fallback state, verification drops, and
+   * non-fatal errors. Rendered persistently on the vetting card.
+   * Shape: VettingDiagnostics (lib/vetting/diagnostics.ts). Null until the
+   * first post-migration vetting run.
+   */
+  vettingDiagnostics: jsonb("vetting_diagnostics"),
   /** Rank within the project shortlist (1 = first choice) */
   rank: integer("rank"),
   status: candidateStatusEnum("status").notNull().default("pending"),
@@ -475,6 +483,16 @@ export const payments = pgTable("payments", {
    * Fee structure UNVERIFIED — confirm at https://www.paypal.com/us/webapps/mpp/paypal-fees
    */
   payoutFeeUsd: decimal("payout_fee_usd", { precision: 10, scale: 2 }),
+
+  /**
+   * Human-readable payout failure reason from the PayPal webhook payload
+   * (resource.errors name + message, or resource.reason).
+   * Set by the PAYOUTS-ITEM.FAILED / PAYOUTSBATCH.DENIED|FAILED handlers
+   * (migration 0012). NULL until a failure arrives. Surfaced on the
+   * approvals queue, the money-flow panel, and the operations payments
+   * grid so admins can debug without reading raw webhook payloads.
+   */
+  payoutFailureReason: text("payout_failure_reason"),
 
   /** From the Orders API capture response — used for dispute lookups */
   paypalOrderId: text("paypal_order_id"),

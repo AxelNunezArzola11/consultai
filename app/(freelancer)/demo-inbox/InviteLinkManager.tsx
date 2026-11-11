@@ -12,9 +12,15 @@ import { useState } from "react";
 
 interface Props {
   ndaId: string;
+  /**
+   * Whether the viewer's role may issue links (company/admin only, per
+   * canIssueNdaInviteLinks). Freelancers see guidance instead of a control
+   * the server would always reject with 403.
+   */
+  canIssue: boolean;
 }
 
-export function InviteLinkManager({ ndaId }: Props) {
+export function InviteLinkManager({ ndaId, canIssue }: Props) {
   const [state, setState] = useState<
     | { kind: "idle" }
     | { kind: "loading" }
@@ -65,6 +71,18 @@ export function InviteLinkManager({ ndaId }: Props) {
     } catch {
       setCopied(false);
     }
+  }
+
+  if (!canIssue) {
+    return (
+      <div className="space-y-2">
+        <p className="text-xs text-muted-foreground">
+          Secure single-use link. Only the company operator can issue invite
+          links — sign in with the company demo account to issue this
+          invitation&apos;s link, then open it here to accept as the candidate.
+        </p>
+      </div>
+    );
   }
 
   if (state.kind === "ready") {

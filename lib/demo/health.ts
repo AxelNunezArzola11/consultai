@@ -25,6 +25,14 @@ export interface SystemHealth {
     ai: "configured" | "missing" | "skipped_demo";
     backend: "reachable" | "unreachable" | "unconfigured" | "skipped_demo";
   };
+  /**
+   * GitHub API credential presence (vetting needs GITHUB_TOKEN for its
+   * 5000 req/hr quota; anonymous quota exhausts on shared serverless IPs).
+   * Boolean-only — never a secret value.
+   */
+  github: "configured" | "missing" | "skipped_demo";
+  /** Active Groq model id for vetting/extraction (not secret). Null in demo. */
+  llmModel: string | null;
   detail: string;
 }
 
@@ -61,6 +69,8 @@ export async function getSystemHealth(): Promise<SystemHealth> {
         ai: "skipped_demo",
         backend: "skipped_demo",
       },
+      github: "skipped_demo",
+      llmModel: null,
       detail:
         "Offline demo mode: serving fictional TechNova fixtures. No external service is contacted.",
     };
@@ -88,6 +98,11 @@ export async function getSystemHealth(): Promise<SystemHealth> {
       : ("missing" as const);
   const ai = process.env.GROQ_API_KEY ? "configured" : ("missing" as const);
   const backend = await probeBackend();
+  const github =
+    process.env.GITHUB_TOKEN || process.env.GITHUB_PAT
+      ? ("configured" as const)
+      : ("missing" as const);
+  const llmModel = process.env.LLM_GROQ_MODEL ?? "qwen/qwen3-32b";
 
   if (dbCheck !== "ok") {
     const reason =
@@ -101,19 +116,26 @@ export async function getSystemHealth(): Promise<SystemHealth> {
       mode: "LIVE",
       latencyMs,
       checks: { database: dbCheck, paypal, ai, backend },
+      github,
+      llmModel,
       detail: `Database unavailable: ${reason} Live data cannot load — switch to DEMO mode for the offline scenario.`,
     };
   }
 
   const degraded =
-    paypal === "missing" || ai === "missing" || backend === "unreachable";
+    paypal === "missing" ||
+    ai === "missing" ||
+    backend === "unreachable" ||
+    github === "missing";
   return {
     status: degraded ? "degraded" : "connected",
     mode: "LIVE",
     latencyMs,
     checks: { database: dbCheck, paypal, ai, backend },
+    github,
+    llmModel,
     detail: degraded
-      ? "Database connected, but at least one integration (PayPal, AI, backend) is unconfigured or unreachable."
+      ? "Database connected, but at least one integration (PayPal, AI, GitHub, backend) is unconfigured or unreachable."
       : "All systems connected.",
   };
 }

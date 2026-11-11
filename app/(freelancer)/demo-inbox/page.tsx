@@ -8,6 +8,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { InviteLinkManager } from "./InviteLinkManager";
+import { canIssueNdaInviteLinks } from "@/lib/nda/invite-permissions";
 import { isDemoMode } from "@/lib/demo/config";
 import { getDemoTables } from "@/lib/demo/store";
 import { requirePageRole, candidateIdsForFreelancer } from "@/lib/auth/guards";
@@ -184,7 +185,10 @@ export default async function DemoInboxPage() {
                   )}
 
                   <div className="rounded-lg border bg-muted p-3">
-                    <InviteLinkManager ndaId={nda.id} />
+                    <InviteLinkManager
+                      ndaId={nda.id}
+                      canIssue={canIssueNdaInviteLinks(auth.role)}
+                    />
                   </div>
                 </CardContent>
               </Card>

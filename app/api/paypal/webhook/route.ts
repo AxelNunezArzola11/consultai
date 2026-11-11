@@ -21,9 +21,18 @@
  *   CAPTURE.COMPLETED     → resource.id (captureId), resource.supplementary_data.related_ids.order_id
  *                           resource.custom_id (UNVERIFIED — logged if present)
  *   PAYOUTSBATCH.*        → resource.batch_header.payout_batch_id (batch-level only, no item detail)
+ *   PAYOUTSBATCH.DENIED    → payment → failed, milestone → failed (denied
+ *                             batches emit no item events, so the batch event
+ *                             must close the states itself)
+ *   PAYOUTSBATCH.FAILED    → same close-out as DENIED (payment → failed,
+ *                             milestone → failed). The dashed alias
+ *                             PAYMENT.PAYOUTS-BATCH.FAILED is accepted too.
  *   PAYOUTS-ITEM.*        → resource.payout_item.sender_item_id ("ITEM_{payment.id}")
  *                           resource.payout_item_id, resource.transaction_id
  *                           sender_item_id UNVERIFIED in live webhook (confirmed from docs)
+ *   FAILED handlers       → also persist resource.errors (name + message) or
+ *                           resource.reason into payments.payout_failure_reason
+ *                           so the dashboards can show WHY the payout failed.
  *   DISPUTE.CREATED       → resource.dispute_id, resource.disputed_transactions[0].buyer_transaction_id
  *                           resource.dispute_amount, resource.reason, resource.dispute_state
  *   DISPUTE.UPDATED       → same shape as CREATED; resource.dispute_state updated
@@ -50,7 +59,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import { verifyPayPalWebhook } from "@/lib/paypal/webhook";
 import { db } from "@/lib/db";
@@ -96,6 +105,86 @@ async function tryRecordEventId(eventId: string, eventType: string): Promise<boo
     .returning({ eventId: paypalWebhookDeliveries.eventId });
 
   return result.length > 0;
+}
+
+/**
+ * Extracts the payout failure reason from a FAILED/DENIED webhook resource.
+ *
+ * PayPal shapes (all UNVERIFIED in live webhooks — from docs + fixtures):
+ *   PAYOUTS-ITEM.FAILED: resource.errors = { name, message, ... } (object)
+ *   batch events:        resource.errors (object or array) or resource.reason
+ *
+ * Returns the PayPal error code, the message, and the combined display
+ * string ("CODE: message", capped at 500 chars). All null when the payload
+ * carries no reason — callers then skip the reason update.
+ */
+function extractPayoutFailureReason(
+  resource: Record<string, unknown> | undefined
+): { code: string | null; message: string | null; reason: string | null } {
+  const rawErrors = resource?.errors as
+    | Record<string, unknown>
+    | Array<Record<string, unknown>>
+    | undefined;
+  const errorsObj = Array.isArray(rawErrors) ? rawErrors[0] : rawErrors;
+
+  const rawCode = errorsObj?.name ?? errorsObj?.code;
+  const code = typeof rawCode === "string" && rawCode.length > 0 ? rawCode : null;
+
+  const rawMessage = errorsObj?.message ?? errorsObj?.description;
+  let message =
+    typeof rawMessage === "string" && rawMessage.length > 0 ? rawMessage : null;
+  if (!message && typeof resource?.reason === "string" && resource.reason.length > 0) {
+    message = resource.reason;
+  }
+
+  let reason: string | null = null;
+  if (code && message) reason = `${code}: ${message}`;
+  else if (code) reason = code;
+  else if (message) reason = message;
+  if (reason && reason.length > 500) reason = `${reason.slice(0, 497)}...`;
+
+  return { code, message, reason };
+}
+
+/**
+ * Runtime bootstrap for migration 0012 (payments.payout_failure_reason).
+ * Same pattern as ensureVettingDiagnosticsColumn: deployments that skip the
+ * SQL script self-heal on the first failure webhook instead of 500ing.
+ * Returns false when the DDL cannot run — the caller then skips the reason
+ * write but the status update (separate query) is unaffected.
+ */
+async function ensurePayoutFailureReasonColumn(): Promise<boolean> {
+  try {
+    await db.execute(
+      sql`ALTER TABLE "payments" ADD COLUMN IF NOT EXISTS "payout_failure_reason" text`
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Best-effort write of the failure reason to the payment row.
+ * Never throws — a missing reason or a stale DB must not fail the webhook.
+ */
+async function persistPayoutFailureReason(
+  paymentId: string,
+  reason: string | null
+): Promise<void> {
+  if (!reason) return;
+  if (!(await ensurePayoutFailureReasonColumn())) return;
+  try {
+    await db
+      .update(payments)
+      .set({ payoutFailureReason: reason, updatedAt: new Date() })
+      .where(eq(payments.id, paymentId));
+  } catch (err) {
+    console.warn("[webhook] Failed to persist payout failure reason (non-fatal):", {
+      paymentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +290,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       case "PAYMENT.PAYOUTSBATCH.SUCCESS":
         await handlePayoutsBatchSuccess(resource, eventId);
+        break;
+
+      case "PAYMENT.PAYOUTSBATCH.DENIED":
+        await handlePayoutsBatchFailed(resource, eventId, "PAYMENT.PAYOUTSBATCH.DENIED");
+        break;
+
+      case "PAYMENT.PAYOUTSBATCH.FAILED":
+      case "PAYMENT.PAYOUTS-BATCH.FAILED":
+        await handlePayoutsBatchFailed(resource, eventId, eventType);
         break;
 
       case "PAYMENT.PAYOUTS-ITEM.SUCCEEDED":
@@ -473,6 +571,101 @@ async function handlePayoutsBatchSuccess(
 }
 
 /**
+ * PAYMENT.PAYOUTSBATCH.DENIED / PAYMENT.PAYOUTSBATCH.FAILED
+ * (plus the PAYMENT.PAYOUTS-BATCH.FAILED dashed alias)
+ * Doc: https://developer.paypal.com/docs/api/payments.payouts-batch/v1/#definition-payout_batch_header
+ *
+ * PayPal refused or failed the whole batch (e.g. compliance hold). Without
+ * this handler the milestone would sit in `verifying` forever: item-level
+ * events never arrive for a denied/failed batch, so the batch event itself
+ * must fail the payment (processing → failed) and the milestone
+ * (verifying → failed). Individual item failures, when they arrive, are
+ * idempotent no-ops on top of this (same-state transitions allowed).
+ *
+ * Maps by resource.batch_header.payout_batch_id → payments.paypalPayoutBatchId.
+ * Persists resource.errors / resource.reason into
+ * payments.payout_failure_reason for the dashboards.
+ */
+async function handlePayoutsBatchFailed(
+  resource: Record<string, unknown> | undefined,
+  eventId: string,
+  eventType: string
+): Promise<void> {
+  console.log(`[webhook] ${eventType} resource keys:`, Object.keys(resource ?? {}));
+
+  const batchHeader = resource?.batch_header as Record<string, unknown> | undefined;
+  const batchId     = batchHeader?.payout_batch_id as string | undefined;
+  const { code: failureCode, reason: failureReason } =
+    extractPayoutFailureReason(resource);
+
+  console.log(`[webhook] ${eventType} fields:`, {
+    batchId:     batchId     ?? "(absent)",
+    failureCode: failureCode ?? "(absent)",
+  });
+
+  if (!batchId) return;
+
+  const rows = await db
+    .select()
+    .from(payments)
+    .where(eq(payments.paypalPayoutBatchId, batchId))
+    .limit(1);
+  const paymentRow = rows[0];
+
+  if (!paymentRow) {
+    console.warn(`[webhook] ${eventType}: no payment found for batchId:`, batchId);
+    return;
+  }
+
+  const fromPayment = paymentRow.status as PaymentStatus;
+  assertPaymentTransition(fromPayment, "failed");
+
+  await db
+    .update(payments)
+    .set({ status: "failed", updatedAt: new Date() })
+    .where(eq(payments.id, paymentRow.id));
+
+  // Best-effort reason write (separate query — never breaks the status update)
+  await persistPayoutFailureReason(paymentRow.id, failureReason);
+
+  const milestoneRows = await db
+    .select()
+    .from(milestones)
+    .where(eq(milestones.id, paymentRow.milestoneId))
+    .limit(1);
+  const milestone = milestoneRows[0];
+
+  if (milestone) {
+    const fromMilestone = milestone.status as MilestoneStatus;
+    if (fromMilestone !== "failed") {
+      assertMilestoneTransition(fromMilestone, "failed");
+      await db
+        .update(milestones)
+        .set({ status: "failed", updatedAt: new Date() })
+        .where(eq(milestones.id, milestone.id));
+    }
+  }
+
+  await writeAuditLog({
+    entityType: "payment",
+    entityId: paymentRow.id,
+    event: eventType === "PAYMENT.PAYOUTSBATCH.DENIED"
+      ? "PAYOUT_BATCH_DENIED"
+      : "PAYOUT_BATCH_FAILED",
+    actor: "paypal_webhook",
+    payload: {
+      webhookEventId: eventId,
+      batchId,
+      milestoneId: paymentRow.milestoneId,
+      failureCode: failureCode ?? null,
+      failureReason: failureReason ?? null,
+    },
+  });
+
+  console.log(`[webhook] ${eventType}: payment`, paymentRow.id, "→ failed; milestone → failed");
+}
+
+/**
  * PAYMENT.PAYOUTS-ITEM.SUCCEEDED
  * Doc: https://developer.paypal.com/docs/api/payments.payouts-batch/v1/#definition-payout_item_details
  *
@@ -601,7 +794,8 @@ async function handlePayoutsItemSucceeded(
  * Doc: https://developer.paypal.com/docs/api/payments.payouts-batch/v1/#definition-payout_item_details
  *
  * Transition: payment → failed; milestone → failed | returned
- * errorCode from resource.errors.name (UNVERIFIED field path — log keys to confirm)
+ * Persists resource.errors (name + message) into
+ * payments.payout_failure_reason for the dashboards.
  */
 async function handlePayoutsItemFailed(
   resource: Record<string, unknown> | undefined,
@@ -613,14 +807,15 @@ async function handlePayoutsItemFailed(
   const payoutItem   = resource?.payout_item as Record<string, unknown> | undefined;
   const senderItemId = payoutItem?.sender_item_id as string | undefined;
   const payoutItemId = resource?.payout_item_id as string | undefined;
-  const errorsObj    = resource?.errors as Record<string, unknown> | undefined;
-  // Log keys of errors object to confirm structure (values may contain PII)
-  const errorsKeys   = errorsObj ? Object.keys(errorsObj) : [];
+  const { code: failureCode, reason: failureReason } =
+    extractPayoutFailureReason(resource);
 
+  // Log the error CODE only (PayPal constant, safe) — the full message may
+  // contain PII, so it goes to the DB + audit payload, never the log line.
   console.log(`[webhook] ${eventType} fields:`, {
     senderItemId:  senderItemId ?? "(absent)",
     payoutItemId:  payoutItemId ?? "(absent)",
-    errorsKeys:    errorsKeys,
+    failureCode:   failureCode  ?? "(absent)",
   });
 
   let paymentRow: typeof payments.$inferSelect | undefined;
@@ -658,6 +853,9 @@ async function handlePayoutsItemFailed(
     .set({ status: "failed", updatedAt: new Date() })
     .where(eq(payments.id, paymentRow.id));
 
+  // Best-effort reason write (separate query — never breaks the status update)
+  await persistPayoutFailureReason(paymentRow.id, failureReason);
+
   // Milestone terminal state
   const milestoneRows = await db
     .select()
@@ -692,6 +890,8 @@ async function handlePayoutsItemFailed(
       senderItemId:  senderItemId ?? null,
       payoutItemId:  payoutItemId ?? null,
       milestoneId:   paymentRow.milestoneId,
+      failureCode:   failureCode ?? null,
+      failureReason: failureReason ?? null,
     },
   });
 

@@ -34,7 +34,8 @@ export default async function ApprovalsPage({
 
   if (!project) notFound();
 
-  // Load funded milestones for this project
+  // Load funded milestones for this project — failed/returned payouts stay
+  // in the queue so admins can see the PayPal reason and retry.
   const fundedMilestones = demoTables
     ? demoTables.milestones
         .filter(
@@ -42,7 +43,9 @@ export default async function ApprovalsPage({
             m.projectId === id &&
             (m.status === "funded" ||
               m.status === "pending_approval" ||
-              m.status === "verifying")
+              m.status === "verifying" ||
+              m.status === "failed" ||
+              m.status === "returned")
         )
         .sort((a, b) => a.position - b.position)
     : await db
@@ -51,7 +54,7 @@ export default async function ApprovalsPage({
         .where(
           and(
             eq(milestones.projectId, id),
-            inArray(milestones.status, ["funded", "pending_approval", "verifying"])
+            inArray(milestones.status, ["funded", "pending_approval", "verifying", "failed", "returned"])
           )
         )
         .orderBy(milestones.position);
@@ -119,7 +122,11 @@ export default async function ApprovalsPage({
 
       <div className="space-y-4">
         {fundedMilestones.map((milestone) => {
-          const payment = paymentRows.find((p) => p.milestoneId === milestone.id);
+          // A retried payout leaves the failed row behind — always render
+          // the newest attempt so a re-issued payout doesn't show stale failure.
+          const payment = paymentRows
+            .filter((p) => p.milestoneId === milestone.id)
+            .sort((a, b) => +b.createdAt - +a.createdAt)[0];
           const approval = payment
             ? approvalRows.find((a) => a.paymentId === payment.id)
             : undefined;
@@ -140,8 +147,11 @@ export default async function ApprovalsPage({
             milestone.status === "funded"           ? "Held (simulated)" :
             milestone.status === "pending_approval" ? "Awaiting Approval" :
             milestone.status === "verifying"        ? "Payout Processing" :
+            milestone.status === "failed"           ? "Payout Failed" :
+            milestone.status === "returned"         ? "Funds Returned" :
             milestone.status;
           const badgeVariant =
+            milestone.status === "failed"    ? "destructive" as const :
             milestone.status === "verifying" ? "default" as const : "outline" as const;
 
           return (
@@ -195,6 +205,7 @@ export default async function ApprovalsPage({
                     approvalId={approval?.id ?? undefined}
                     milestoneStatus={milestone.status}
                     paymentStatus={payment.status}
+                    payoutFailureReason={payment.payoutFailureReason ?? undefined}
                   />
                 ) : (
                   // Milestone was funded via seed/demo — no payments row exists.

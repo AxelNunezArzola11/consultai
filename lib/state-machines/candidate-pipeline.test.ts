@@ -83,6 +83,24 @@ describe("candidate pipeline — assertCandidateTransition", () => {
     expect(isCandidateTransitionAllowed("nda_sent", "declined")).toBe(true);
   });
 
+  it("allows direct hire from BOOKING_UNLOCKED (meeting leg skipped)", () => {
+    expect(() =>
+      assertCandidateTransition("booking_unlocked", "selected")
+    ).not.toThrow();
+    expect(isCandidateTransitionAllowed("booking_unlocked", "selected")).toBe(
+      true
+    );
+  });
+
+  it("still rejects hire from pre-NDA states", () => {
+    expect(() =>
+      assertCandidateTransition("shortlisted", "selected")
+    ).toThrowError(CandidateTransitionError);
+    expect(() =>
+      assertCandidateTransition("nda_sent", "selected")
+    ).toThrowError(CandidateTransitionError);
+  });
+
   it("allows INVALID_BOOKING from booked", () => {
     expect(isCandidateTransitionAllowed("booked", "invalid_booking")).toBe(true);
   });
